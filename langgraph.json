@@ -1,0 +1,17 @@
+{
+  "graphs": {
+  "chat": "apps/chat/graph.py:graph"
+  },
+  "dependencies": [
+    "langgraph>=0.2.34",
+    "langgraph-cli>=0.3.8",
+    "langgraph-api>=0.3.1",
+    "langgraph-runtime-inmem>=0.8.1",
+    "langchain-core>=0.2.35",
+    "langchain-openai>=0.1.23",
+    "openai>=1.40",
+    "pgvector>=0.2.5",
+    "psycopg[binary]>=3.1"
+  ],
+  "env": {}
+}

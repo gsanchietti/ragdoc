@@ -3,6 +3,7 @@
 
 # Python
 __pycache__/
+*.egg-info/
 *.py[cod]
 *.pyo
 *.pyd
@@ -17,3 +18,6 @@ __pycache__/
 # Project data/state
 .ragdoc/
 /data/
+
+# LanGraph
+.langgraph_api/
