@@ -55,7 +55,16 @@ class HttpFetcher:
         fname = safe_name(src.url)
         # Try to infer extension from content-type
         ctype = resp.headers.get("Content-Type", "").lower()
-        ext = ".html" if "text/html" in ctype else (".md" if "markdown" in ctype or "text/plain" in ctype else "")
+        if "text/html" in ctype:
+            ext = ".html"
+        elif "markdown" in ctype or "text/markdown" in ctype:
+            ext = ".md"
+        elif "rst" in ctype or "restructured" in ctype:
+            ext = ".rst"
+        elif "text/plain" in ctype:
+            ext = ".txt"
+        else:
+            ext = ""
         out_file = out_dir / f"{fname}{ext}"
         out_file.write_bytes(resp.content)
         logger.info("Saved %s (%d bytes)", out_file, len(resp.content))

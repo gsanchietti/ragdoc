@@ -11,7 +11,7 @@ import yaml
 from .http_fetcher import HttpFetcher
 from .git_fetcher import GitRepoFetcher
 from .models import FetchConfig, GitSource, HttpSource
-from .text_extraction import html_to_text, read_markdown, chunk_text
+from .text_extraction import html_to_text, chunk_text, read_by_suffix
 from .indexer import EmbeddingClient, PgVectorIndexer, EmbeddingChunk
 
 
@@ -28,8 +28,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-root", default=Path("."), type=Path, help="Project root for outputs")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL", ""), help="Postgres DSN (or set DATABASE_URL)")
-    parser.add_argument("--md-glob", default="**/*.md", help="Glob for Markdown files to index")
-    parser.add_argument("--md-root", action="append", default=[], help="Root directory to search for Markdown (can repeat)")
+    parser.add_argument(
+        "--glob",
+        action="append",
+        default=["**/*.md", "**/*.txt", "**/*.rst"],
+        help="File glob(s) to index; can repeat. Defaults to **/*.md, **/*.txt, **/*.rst",
+    )
+    parser.add_argument(
+        "--root",
+        action="append",
+        default=[],
+        help="Root directory(ies) to search for files; can repeat. Defaults to repo dirs or project root",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(levelname)s %(message)s")
@@ -67,30 +77,40 @@ def main(argv: list[str] | None = None) -> int:
         http_chunks: list[EmbeddingChunk] = []
         for path, url in http_outputs:
             content = path.read_bytes()
-            text = html_to_text(content) if path.suffix.lower() in {".html", ".htm"} else read_markdown(path)
+            if path.suffix.lower() in {".html", ".htm"}:
+                text = html_to_text(content)
+            else:
+                text = read_by_suffix(path)
             for chunk in chunk_text(text):
                 http_chunks.append(EmbeddingChunk(text=chunk, source_type="http", source_url=url, path=str(path)))
 
         _index_chunks_batched(http_chunks, embedder, indexer)
 
-        # Index Markdown files (configurable glob and roots)
-        md_glob = args.md_glob
-        md_roots: list[Path] = [Path(p) for p in args.md_root] if args.md_root else []
-        if not md_roots:
+        # Index content files (txt/md/rst) with configurable globs and roots
+        globs: list[str] = args.glob
+        roots: list[Path] = [Path(p) for p in (args.root or [])]
+        if not roots:
             # Default to repos out_dir if present, else project root
-            default_repo_dirs = { (out_root / (s.out_dir or "data/repos")) for s in cfg.git }
-            md_roots = list(default_repo_dirs) if default_repo_dirs else [out_root]
+            default_repo_dirs = {(out_root / (s.out_dir or "data/repos")) for s in cfg.git}
+            roots = list(default_repo_dirs) if default_repo_dirs else [out_root]
 
-        md_chunks: list[EmbeddingChunk] = []
-        for root in md_roots:
-            for md_path in root.rglob(md_glob):
-                if not md_path.is_file():
-                    continue
-                text = read_markdown(md_path)
-                for chunk in chunk_text(text):
-                    md_chunks.append(EmbeddingChunk(text=chunk, source_type="md", path=str(md_path)))
+        content_chunks: list[EmbeddingChunk] = []
+        for root in roots:
+            for pattern in globs:
+                for p in root.rglob(pattern):
+                    if not p.is_file():
+                        continue
+                    logging.info("Reading %s", p)
+                    text = read_by_suffix(p)
+                    stype = {
+                        ".md": "md",
+                        ".markdown": "md",
+                        ".rst": "rst",
+                    }.get(p.suffix.lower(), "txt")
+                    for chunk in chunk_text(text):
+                        content_chunks.append(EmbeddingChunk(text=chunk, source_type=stype, path=str(p)))
 
-        _index_chunks_batched(md_chunks, embedder, indexer)
+        _index_chunks_batched(content_chunks, embedder, indexer)
     finally:
         http.close()
 

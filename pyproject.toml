@@ -11,10 +11,12 @@ dependencies = [
   "openai>=1.40",
   "psycopg[binary]>=3.1",
   "pgvector>=0.2.5",
+  "docutils>=0.20",
 ]
 
 [project.scripts]
 ragdoc-fetch = "ragdoc.fetch.cli:main"
+ragdoc-test = "ragdoc.test.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

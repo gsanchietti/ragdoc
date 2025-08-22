@@ -52,8 +52,8 @@ git:
 export DATABASE_URL="postgresql+psycopg://user:pass@host:5432/ragdoc"
 export OPENAI_API_KEY="sk-..."
 ragdoc-fetch --config configs/sources.yaml \
-  --md-root data/repos \
-  --md-glob "**/*.md"
+  --root data/repos \
+  --glob "**/*.md"
 ```
 
 Outputs will be placed under `data/` and state under `.ragdoc/state.json`.
@@ -61,7 +61,43 @@ Outputs will be placed under `data/` and state under `.ragdoc/state.json`.
 ## Environment
 - Python: 3.12
 - Dependencies: `httpx`, `PyYAML`, `beautifulsoup4`, `openai`, `psycopg[binary]`, `pgvector`
-- No DB required for this step; state is stored locally.
+- A Postgres instance with the `vector` extension is required for indexing. Fetch-only still works without DB (files + local state).
+
+## Run Postgres + pgvector in a container
+
+Use a ready image that ships the pgvector extension.
+
+Docker:
+
+```bash
+docker run --name ragdoc-pg \
+  -e POSTGRES_USER=ragdoc \
+  -e POSTGRES_PASSWORD=ragdoc \
+  -e POSTGRES_DB=ragdoc \
+  -p 5432:5432 \
+  -v ragdoc-pgdata:/var/lib/postgresql/data \
+  -d pgvector/pgvector:pg16
+
+export DATABASE_URL="postgresql+psycopg://ragdoc:ragdoc@127.0.0.1:5432/ragdoc"
+```
+
+Podman:
+
+```bash
+podman run --rm --name ragdoc-pg \
+  -e POSTGRES_USER=ragdoc \
+  -e POSTGRES_PASSWORD=ragdoc \
+  -e POSTGRES_DB=ragdoc \
+  -p 5432:5432 \
+  -v ragdoc-pgdata:/var/lib/postgresql/data \
+  -d docker.io/pgvector/pgvector:pg17
+
+export DATABASE_URL="postgresql+psycopg://ragdoc:ragdoc@127.0.0.1:5432/ragdoc"
+```
+
+Notes:
+- The CLI also attempts `CREATE EXTENSION IF NOT EXISTS vector` on startup; using the pgvector image ensures it succeeds.
+- Adjust ports/credentials as needed; the example uses a named volume `ragdoc-pgdata` for persistence.
 
 ## Notes
 - The job avoids re-downloading unchanged HTTP resources using ETag/Last-Modified when available.
@@ -74,5 +110,4 @@ Outputs will be placed under `data/` and state under `.ragdoc/state.json`.
 
 ## Roadmap (next steps)
 - Add parsers (HTML/MD/PDF) and content normalization
-- Add embedding/indexing to Postgres + pgvector
 - Integrate with LangGraph supervisor and chat UI
