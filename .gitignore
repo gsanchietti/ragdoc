@@ -1,0 +1,19 @@
+# Environments
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# VS Code
+.vscode/
+
+# macOS/Linux
+.DS_Store
+
+# Project data/state
+.ragdoc/
+/data/
