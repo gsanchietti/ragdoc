@@ -20,13 +20,13 @@ class HttpFetcher:
     def close(self) -> None:
         self._client.close()
 
-    def fetch_many(self, sources: Iterable[HttpSource], out_root: Path) -> list[Path]:
-        outputs: list[Path] = []
+    def fetch_many(self, sources: Iterable[HttpSource], out_root: Path) -> list[tuple[Path, str]]:
+        outputs: list[tuple[Path, str]] = []
         for src in sources:
             outputs.extend(self.fetch_one(src, out_root))
         return outputs
 
-    def fetch_one(self, src: HttpSource, out_root: Path) -> list[Path]:
+    def fetch_one(self, src: HttpSource, out_root: Path) -> list[tuple[Path, str]]:
         from .state import load_state, save_state
 
         state = load_state()
@@ -57,10 +57,9 @@ class HttpFetcher:
         ctype = resp.headers.get("Content-Type", "").lower()
         ext = ".html" if "text/html" in ctype else (".md" if "markdown" in ctype or "text/plain" in ctype else "")
         out_file = out_dir / f"{fname}{ext}"
-
         out_file.write_bytes(resp.content)
         logger.info("Saved %s (%d bytes)", out_file, len(resp.content))
 
         set_http_meta(state, src.url, new_etag, new_last_mod)
         save_state(state)
-        return [out_file]
+        return [(out_file, src.url)]
