@@ -1,0 +1,11 @@
+http:
+  - url: https://example.com/
+    out_dir: data/raw/http
+  - url: https://raw.githubusercontent.com/psf/requests/main/README.md
+    out_dir: data/raw/http
+
+git:
+  - repo: https://github.com/python/cpython.git
+    ref: main
+    shallow: true
+    out_dir: data/repos
