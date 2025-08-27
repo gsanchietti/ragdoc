@@ -19,9 +19,11 @@ http:
     exclude_dirs: ["api", "legacy"] # skip these URL paths
     timeout: 15                     # request timeout in seconds
     link_regex: ".*\\.html$"        # optional: only follow HTML links
-``` a hybrid retriever with a test CLI, and a LangGraph agent with clarify → retrieve → answer/escalate.
+```
+A hybrid retriever with a test CLI, and a LangGraph agent with clarify → retrieve → answer/escalate.
 
 ## Features
+
 - HTTP recursive crawling using LangChain's RecursiveUrlLoader
 - Git clone/update using system `git` (shallow by default)
 - JSON-based local state cache under `.ragdoc/state.json`
@@ -122,7 +124,7 @@ The test CLI always executes hybrid search combining:
 - Text-only result discovery for comprehensive coverage
 - Configurable three-way scoring balance via `--alpha` and `--sparse-weight` parameters
 
-6) Run the chat (LangGraph prebuilt UI)
+6) Run the chat (LangGraph Studio prebuilt UI)
 
 ```bash
 export RAGDOC_CONFIDENCE_THRESHOLD=0.65   # optional
@@ -139,6 +141,27 @@ export RAGDOC_RETRIEVAL_SPARSE_WEIGHT=0.3 # sparse vector weight in hybrid searc
 # Use langgraph.json: this will start a dev server and open a browser page to https://smith.langchain.com/
 langgraph dev
 ```
+
+## Using with Agent Chat UI
+
+LangChain provides a ready to use [Agent Chat UI](https://github.com/langchain-ai/agent-chat-ui).
+To use it with the above UI:
+
+- Start ragdoc in server mode:
+  ```
+  langgraph dev --config langgraph.json --port 8000
+  ```
+
+- Clone the [Agent Chat UI repository](https://github.com/langchain-ai/agent-chat-ui) and follow the setup instructions. If you need to install `pnpm` see https://pnpm.io/it/installation
+
+- Enter `agent-chat-app` directory and run the development server:
+  ```
+  cd agent-chat-app
+  pnpm install
+  NEXT_PUBLIC_API_URL=http://localhost:8000 NEXT_PUBLIC_ASSISTANT_ID=chat pnpm dev
+  ```
+
+- Access the UI at port 3000:[http://localhost:3000](http://localhost:3000)
 
 ## Enhanced Retriever
 
@@ -175,6 +198,137 @@ BM25 (Best Matching 25) implements keyword-based sparse vector search using TF-I
 2. Gets top vector similarity results using dense embeddings
 3. Runs parallel text search across title and content fields
 4. Computes BM25 sparse vector scores for keyword matching
+
+## Agent Configuration
+
+The ragdoc agent supports extensive configuration through both YAML configuration files and environment variables.
+
+### Configuration Methods
+
+#### 1. YAML Configuration File
+The primary configuration is stored in `configs/prompts.yaml`:
+
+```yaml
+system:
+  prompt_it: |
+    Sei ragdoc, un assistente di supporto. Rispondi in modo conciso...
+  prompt_en: |
+    You are ragdoc, a support assistant. Answer concisely...
+
+summarization:
+  system_prompt_it: |
+    Analizza la seguente conversazione e riassumi i punti chiave...
+  user_prompt_it: |
+    Conversazione da riassumere:
+    {conversation}
+    
+    Fornisci un riassunto conciso che evidenzi:
+    - Prodotti/servizi coinvolti
+    - Problemi tecnici specifici
+    - Passi già tentati
+```
+
+#### 2. Environment Variable Overrides
+Any YAML configuration can be overridden using environment variables with the pattern:
+`RAGDOC_<SECTION>_<KEY>_<LANGUAGE>`
+
+Examples:
+```bash
+# Override Italian system prompt
+RAGDOC_SYSTEM_PROMPT_IT="Your custom Italian prompt here"
+
+# Override English summarization prompt  
+RAGDOC_SUMMARIZATION_SYSTEM_PROMPT_EN="Your custom summarization prompt"
+
+# Configure model settings
+RAGDOC_SUMMARIZATION_MODEL="gpt-4o-mini"
+RAGDOC_ANSWER_MODEL="gpt-4o-mini"
+```
+
+### New Features
+
+#### Conversation Summarization
+Before performing database searches, the agent now automatically summarizes multi-turn conversations to provide better context for retrieval:
+
+- **Automatic Context Enhancement**: Summarizes conversation history to improve search relevance
+- **Configurable Prompts**: Customize summarization behavior via YAML or environment variables
+- **Language-Aware**: Supports both Italian and English summarization
+- **Model Configuration**: Use `RAGDOC_SUMMARIZATION_MODEL` to specify the LLM model
+
+The summarization improves search results by:
+- Identifying mentioned products and services
+- Capturing technical issues and error details
+- Recording troubleshooting steps already attempted
+- Providing contextual information for better database matching
+
+#### System Prompts
+Configure the main agent personality and behavior:
+
+```bash
+# Italian system prompt
+RAGDOC_SYSTEM_PROMPT_IT="Sei ragdoc, un assistente di supporto..."
+
+# English system prompt
+RAGDOC_SYSTEM_PROMPT_EN="You are ragdoc, a support assistant..."
+```
+
+#### Answer Generation
+Configure how the agent formats responses:
+
+```bash
+# Answer instruction templates (use {refs_text} placeholder)
+RAGDOC_ANSWER_INSTRUCTION_IT="Usa i seguenti estratti per rispondere..."
+RAGDOC_NO_SOURCES_IT="- (nessuna fonte trovata)"
+```
+
+#### Escalation Messages
+Configure messages when escalating to human support:
+
+```bash
+# Base escalation messages
+RAGDOC_ESCALATE_BASE_IT="Sto passando il caso a un collega umano..."
+RAGDOC_ESCALATE_BASE_EN="I'm escalating this case to a human colleague..."
+
+# Additional escalation details (use {attempts}, {confidence}, {keywords} placeholders)
+RAGDOC_ESCALATE_ATTEMPTS_IT="\n\nTentativi di raffinamento effettuati: {attempts}"
+RAGDOC_ESCALATE_CONFIDENCE_IT="\nMigliore confidenza raggiunta: {confidence:.2f}"
+```
+
+#### Placeholder Messages
+Configure messages when no good search results are found:
+
+```bash
+# Placeholder context titles and previews
+RAGDOC_PLACEHOLDER_TITLE_IT="Dettagli richiesti"
+RAGDOC_PLACEHOLDER_PREVIEW_IT="Fornisci maggiori dettagli per migliorare la ricerca."
+```
+
+#### Fallback Questions
+Set default clarification questions:
+
+```bash
+# Fallback when specific questions don't apply
+RAGDOC_FALLBACK_IT="Ho bisogno di maggiori dettagli per trovare le informazioni giuste..."
+RAGDOC_FALLBACK_EN="I need more details to find the right information for you..."
+```
+
+See `.env.example` for a complete list of configurable prompts and their default values.
+
+### Enhanced Iterative Query Refinement
+
+The agent now features an intelligent iterative refinement system that:
+
+- **Analyzes retrieval quality** and suggests specific improvements
+- **Generates targeted questions** based on missing information types:
+  - Product specificity (NethServer, NethSecurity, etc.)
+  - Version information
+  - Error details and log messages
+  - Configuration context
+- **Tracks improvement trajectory** across refinement attempts
+- **Escalates strategically** only after 5 iterations or when confidence is very low
+- **Provides detailed refinement history** for debugging and optimization
+
+This system transforms the agent from a simple Q&A tool into an intelligent assistant that actively helps users formulate better queries.
 5. Combines all result sets with configurable three-way weighting (dense + lexical + sparse)
 6. Applies title boost for documents with query terms in titles
 7. Returns deduplicated results ranked by combined hybrid score
