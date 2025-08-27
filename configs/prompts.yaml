@@ -17,12 +17,14 @@ summarization:
     Analizza la seguente conversazione e riassumi i punti chiave discussi finora.
     Concentrati sui dettagli tecnici, sui prodotti menzionati, sui problemi riscontrati e sui passi già tentati.
     Il riassunto verrà utilizzato per migliorare la ricerca nel database di conoscenza.
+    Se non specificato, assumi che il prodotto sia NethSecurity 8.
   
   system_prompt_en: |
     Analyze the following conversation and summarize the key points discussed so far.
     Focus on technical details, products mentioned, issues encountered, and steps already attempted.
     The summary will be used to improve the search in the knowledge database.
-  
+    If not specified, assume the product is NethSecurity 8.
+
   user_prompt_it: |
     Conversazione da riassumere:
     {conversation}
@@ -72,8 +74,8 @@ placeholder:
   preview_en: "Provide more details to improve the search."
 
 escalation:
-  base_it: "Sto passando il caso a un collega umano con il riepilogo delle informazioni raccolte."
-  base_en: "I'm escalating this case to a human colleague with a summary of the information gathered."
+  base_it: "Non sono in grado di rispondere. Ti consiglio di aprire un ticket al supporto."
+  base_en: "I'm unable to answer this. I recommend opening a support ticket."
   attempts_it: "\n\nTentativi di raffinamento effettuati: {attempts}"
   attempts_en: "\n\nRefinement attempts made: {attempts}"
   confidence_it: "\n\nMigliore confidenza raggiunta: {confidence:.2f}"

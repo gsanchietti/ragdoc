@@ -81,6 +81,11 @@ def _translate_to_english(text: str) -> str:
         logger.debug("Translation: skipping (short ASCII, likely English/technical): %r", text[:50])
         return text
     
+    # Check if OpenAI API key is available
+    if not os.getenv("OPENAI_API_KEY"):
+        logger.debug("Translation: skipping (no API key available)")
+        return text
+    
     try:
         # Use ChatOpenAI for translation
         llm = ChatOpenAI(model=os.getenv("RAGDOC_TRANSLATION_MODEL", "gpt-4o-mini"), temperature=0.0)
@@ -320,6 +325,11 @@ def _summarize_conversation(messages: list[AnyMessage], language: str = "it") ->
         # No conversation to summarize
         return ""
     
+    # Check if OpenAI API key is available
+    if not os.getenv("OPENAI_API_KEY"):
+        logger.debug("Node: retrieve/summarization_skipped | no_api_key")
+        return ""
+    
     # Build conversation text from messages
     conversation_parts = []
     for msg in messages:
@@ -341,9 +351,8 @@ def _summarize_conversation(messages: list[AnyMessage], language: str = "it") ->
     user_prompt = prompts.get_summarization_user_prompt(language).format(conversation=conversation_text)
     
     # Use ChatOpenAI for summarization
-    llm = ChatOpenAI(model=os.getenv("RAGDOC_SUMMARIZATION_MODEL", "gpt-4o-mini"), temperature=0.1)
-    
     try:
+        llm = ChatOpenAI(model=os.getenv("RAGDOC_SUMMARIZATION_MODEL", "gpt-4o-mini"), temperature=0.1)
         response = llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt)
@@ -359,6 +368,18 @@ def _summarize_conversation(messages: list[AnyMessage], language: str = "it") ->
 def retrieve_node(state: AgentState) -> AgentState:
     # Use last user message as query
     logger.debug("Node: retrieve/start | prior_contexts=%s placeholder=%s", bool(state.contexts), state.contexts_placeholder)
+    
+    # Detect if this is a new question in a continuing conversation
+    is_continuing_conversation = False
+    if len(state.messages) > 1:
+        # Check if there's an assistant message before the last user message
+        user_msg_count = sum(1 for m in state.messages if isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("role") == "user"))
+        assistant_msg_count = sum(1 for m in state.messages if isinstance(m, AIMessage) or (isinstance(m, dict) and m.get("role") == "assistant"))
+        is_continuing_conversation = assistant_msg_count > 0 and user_msg_count > 1
+        
+    if is_continuing_conversation:
+        logger.debug("Node: retrieve/continuing_conversation | resetting state for new question")
+    
     query = None
     for m in reversed(state.messages):
         if isinstance(m, HumanMessage):
@@ -449,18 +470,35 @@ def retrieve_node(state: AgentState) -> AgentState:
             logger.debug("Node: retrieve/placeholder_inserted")
     confidence = max((c.get("score", 0.0) for c in contexts if not c.get("_placeholder")), default=0.0)
     logger.debug("Node: retrieve/done | confidence=%.4f placeholder=%s", confidence, placeholder)
+    
+    # Reset clarify_turns for new questions in continuing conversations, but preserve conversation history
+    clarify_turns = 0 if is_continuing_conversation else state.clarify_turns
+    last_clarify_idx = state.last_clarify_idx if not is_continuing_conversation else 0
+    
+    # For continuing conversations with new questions, reset query-specific state but preserve conversation-level state
+    if is_continuing_conversation:
+        refinement_history = []
+        query_keywords = []
+        missing_info_types = []
+        best_confidence = confidence  # Reset to current confidence for new question
+    else:
+        refinement_history = state.refinement_history
+        query_keywords = state.query_keywords
+        missing_info_types = state.missing_info_types
+        best_confidence = max(state.best_confidence, confidence)
+    
     return AgentState(
         messages=state.messages,
         language=state.language,
         contexts=contexts,
         confidence=confidence,
-        clarify_turns=state.clarify_turns,
+        clarify_turns=clarify_turns,
         contexts_placeholder=placeholder,
-        last_clarify_idx=state.last_clarify_idx,
-        refinement_history=state.refinement_history,
-        best_confidence=max(state.best_confidence, confidence),
-        query_keywords=state.query_keywords,
-        missing_info_types=state.missing_info_types,
+        last_clarify_idx=last_clarify_idx,
+        refinement_history=refinement_history,
+        best_confidence=best_confidence,
+        query_keywords=query_keywords,
+        missing_info_types=missing_info_types,
     )
 
 
@@ -486,10 +524,22 @@ def answer_node(state: AgentState) -> AgentState:
     prompts = get_agent_prompts()
     refs_text = "\n".join(refs) if refs else prompts.get_no_sources_found(language)
 
-    prompt = prompts.get_answer_instruction(language, refs_text)
-
-    llm = ChatOpenAI(model=os.getenv("RAGDOC_ANSWER_MODEL", "gpt-4o-mini"), temperature=0.1)
-    response = llm.invoke([sys_msg] + state.messages + [HumanMessage(content=prompt)])
+    # Check if this is a multi-turn conversation
+    human_messages = [m for m in state.messages if isinstance(m, HumanMessage)]
+    is_followup = len(human_messages) > 1
+    
+    if is_followup:
+        # For follow-up questions, include the instruction in the system message to avoid confusion
+        enhanced_system_prompt = f"{system_prompt(language)}\n\n{prompts.get_answer_instruction(language, refs_text)}"
+        sys_msg = SystemMessage(content=enhanced_system_prompt)
+        # Use only the conversation messages, no additional instruction
+        llm = ChatOpenAI(model=os.getenv("RAGDOC_ANSWER_MODEL", "gpt-4o-mini"), temperature=0.1)
+        response = llm.invoke([sys_msg] + state.messages)
+    else:
+        # For first questions, use the original approach
+        prompt = prompts.get_answer_instruction(language, refs_text)
+        llm = ChatOpenAI(model=os.getenv("RAGDOC_ANSWER_MODEL", "gpt-4o-mini"), temperature=0.1)
+        response = llm.invoke([sys_msg] + state.messages + [HumanMessage(content=prompt)])
     logger.debug("Node: answer/done | appended AIMessage")
     return AgentState(
         messages=state.messages + [response],
@@ -640,6 +690,49 @@ def supervisor(state: AgentState) -> str:
     return decision
 
 
+def answer_router(state: AgentState) -> Literal["wait", "retrieve"]:
+    """
+    Router after answer node to determine if conversation should continue.
+    Checks if there are new user messages after the last assistant response.
+    """
+    logger.debug("Router: answer_router/start | total_messages=%d", len(state.messages))
+    
+    if not state.messages:
+        logger.debug("Router: answer_router/no_messages -> wait")
+        return "wait"
+    
+    # Find the last assistant message (our answer)
+    last_assistant_idx = -1
+    for i in reversed(range(len(state.messages))):
+        msg = state.messages[i]
+        if isinstance(msg, AIMessage) or (isinstance(msg, dict) and msg.get("role") == "assistant"):
+            last_assistant_idx = i
+            break
+    
+    # Check if there are any human messages after the last assistant message
+    has_new_human_input = False
+    if last_assistant_idx >= 0:
+        for i in range(last_assistant_idx + 1, len(state.messages)):
+            msg = state.messages[i]
+            if isinstance(msg, HumanMessage) or (isinstance(msg, dict) and msg.get("role") == "user"):
+                has_new_human_input = True
+                break
+    else:
+        # No assistant message found, check if there are any human messages
+        for msg in state.messages:
+            if isinstance(msg, HumanMessage) or (isinstance(msg, dict) and msg.get("role") == "user"):
+                has_new_human_input = True
+                break
+    
+    if has_new_human_input:
+        logger.debug("Router: answer_router/new_human_input -> retrieve")
+        # Reset some state for the new question
+        return "retrieve"
+    else:
+        logger.debug("Router: answer_router/no_new_input -> wait")
+        return "wait"
+
+
 def build_graph() -> Any:
     from typing import Any as _Any
     import os
@@ -655,7 +748,8 @@ def build_graph() -> Any:
     graph.add_conditional_edges("retrieve", supervisor, {"clarify": "clarify", "answer": "answer", "escalate": "escalate"})
     # Human-in-the-loop: if feedback already present, loop to retrieve; otherwise end and wait for user
     graph.add_conditional_edges("clarify", clarify_router, {"retrieve": "retrieve", "wait": END})
-    graph.add_edge("answer", END)
+    # After answer, check if user wants to continue the conversation
+    graph.add_conditional_edges("answer", answer_router, {"retrieve": "retrieve", "wait": END})
     graph.add_edge("escalate", END)
 
     compiled = graph.compile()

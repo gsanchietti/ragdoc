@@ -38,7 +38,7 @@ A hybrid retriever with a test CLI, and a LangGraph agent with clarify → retri
   - Configurable weighting between vector and lexical scores
   - Title boost for enhanced relevance of document titles
   - Text-only result discovery (finds high-relevance text matches beyond top vector results)
-- Test CLI `ragdoc-test` with comprehensive hybrid search and debug logging
+- Test CLI `ragdoc-test` with comprehensive hybrid search, interactive chat interface, and debug logging
 - LangGraph agent: router → (intro|clarify|retrieve) → answer or escalate; confidence gating, automatic translation to English for database search, and history-aware retrieval
 
 ## Quickstart (with uv)
@@ -124,7 +124,22 @@ The test CLI always executes hybrid search combining:
 - Text-only result discovery for comprehensive coverage
 - Configurable three-way scoring balance via `--alpha` and `--sparse-weight` parameters
 
-6) Run the chat (LangGraph Studio prebuilt UI)
+6) Test the agent with interactive chat
+
+```bash
+# Interactive chat session
+ragdoc-test chat
+
+# Automated conversation test
+ragdoc-test chat --test
+
+# Chat in English
+ragdoc-test chat --language en
+```
+
+The chat command provides a full conversational interface with the RAGDoc agent, including context preservation across multiple turns, debug capabilities, and automated testing.
+
+7) Run the chat (LangGraph Studio prebuilt UI)
 
 ```bash
 export RAGDOC_CONFIDENCE_THRESHOLD=0.65   # optional
@@ -329,6 +344,27 @@ The agent now features an intelligent iterative refinement system that:
 - **Provides detailed refinement history** for debugging and optimization
 
 This system transforms the agent from a simple Q&A tool into an intelligent assistant that actively helps users formulate better queries.
+
+### Continuous Conversation Support
+
+The agent now supports seamless multi-turn conversations without terminating after providing answers:
+
+- **Non-Terminating Responses**: After answering a question, the agent waits for follow-up questions or refinements
+- **Context Preservation**: Maintains conversation history across multiple interactions within the same session
+- **Smart State Management**: Automatically resets retrieval state when users ask new questions while preserving conversation context
+- **Answer Router**: Intelligently determines whether to wait for user input or proceed with new retrievals based on conversation flow
+- **Query-Specific State Reset**: When users ask new questions in ongoing conversations, query-specific state (clarify turns, refinement history, keywords) is reset while conversation history is preserved
+
+This enables natural conversational interactions where users can:
+- Ask follow-up questions
+- Request clarifications or refinements  
+- Pivot to related topics
+- Build upon previous answers
+
+The system intelligently distinguishes between:
+- **Continuing the same query**: Preserves all state for refinement iterations
+- **Starting a new question**: Resets query-specific state but maintains conversation history for context
+
 5. Combines all result sets with configurable three-way weighting (dense + lexical + sparse)
 6. Applies title boost for documents with query terms in titles
 7. Returns deduplicated results ranked by combined hybrid score
@@ -354,6 +390,63 @@ The translation detection supports common patterns from:
 
 ### Configuration
 Use `RAGDOC_TRANSLATION_MODEL` to specify the model for translation (default: `gpt-4o-mini`)
+
+## Interactive Chat Interface
+
+RAGDoc includes an integrated interactive chat interface accessible through the test CLI:
+
+### Basic Usage
+
+```bash
+# Start interactive chat (Italian by default)
+ragdoc-test chat
+
+# Start chat in English
+ragdoc-test chat --language en
+
+# Run automated conversation test to verify context preservation
+ragdoc-test chat --test
+```
+
+### Chat Commands
+
+During chat sessions, you can use these commands:
+- `quit` or `exit`: End the chat session
+- `debug`: Show current conversation state and context
+- `clear`: Clear conversation history and start fresh
+
+### Features
+
+- **Multi-turn conversations**: Maintains context across multiple questions
+- **Language detection**: Automatically handles Italian and English
+- **Debug information**: View conversation state, confidence scores, and retrieved contexts
+- **Automated testing**: Built-in test for conversation context preservation
+- **Integrated with retrieval**: Uses the same hybrid search as the query command
+
+### Example Session
+
+```bash
+$ ragdoc-test chat
+🤖 RAGDoc Chat Interface
+Language: it
+Type 'quit', 'exit', or press Ctrl+C to stop
+
+👤 You: Come configurare il firewall di NethSecurity?
+🤖 RAGDoc: Per configurare il firewall di NethSecurity...
+
+👤 You: E per il backup automatico?
+🤖 RAGDoc: Per configurare il backup automatico...
+
+👤 You: debug
+============================== DEBUG INFO ==============================
+Messages: 4
+Language: it
+Contexts: 8
+Confidence: 0.85
+...
+```
+
+The chat interface properly maintains conversation context, so follow-up questions are understood in relation to previous messages without losing context.
 
 ## Environment
 - Python: 3.12

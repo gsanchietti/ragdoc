@@ -73,11 +73,14 @@ class AgentPrompts:
             "Conversation to summarize:\n{conversation}\n\nProvide a summary." if language == "en"
             else "Conversazione da riassumere:\n{conversation}\n\nFornisci un riassunto.")
     
-    def get_answer_instruction(self, language: str = "it") -> str:
-        """Get answer instruction for the specified language."""
-        return self._get_config_value("answer", "instruction", language,
-            "Use the following excerpts to answer." if language == "en"
-            else "Usa i seguenti estratti per rispondere.")
+    def get_answer_instruction(self, language: str = "it", refs_text: str = "") -> str:
+        """Get answer instruction for the specified language with references formatted."""
+        template = self._get_config_value("answer", "instruction", language,
+            "Use the following excerpts to answer. Include a 'References' section with the URLs used.\n\nReferences:\n{refs_text}\n\nAnswer now." if language == "en"
+            else "Usa i seguenti estratti per rispondere. Includi una sezione 'Riferimenti' con le URL usate.\n\nRiferimenti:\n{refs_text}\n\nRispondi ora.")
+        
+        # Format the template with refs_text
+        return template.format(refs_text=refs_text)
     
     def get_no_sources_found(self, language: str = "it") -> str:
         """Get no sources found message for the specified language."""
