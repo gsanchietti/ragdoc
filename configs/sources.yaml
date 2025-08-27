@@ -1,9 +1,13 @@
 http:
+  - url: https://docs.nethsecurity.org/en/latest/
+    out_dir: data/raw/http
+    max_depth: 10
+    timeout: 30
+  - url: https://dev.nethsecurity.org/
+    out_dir: data/raw/http
+    max_depth: 10
+    timeout: 30
   - url: https://www.nethsecurity.org/
     out_dir: data/raw/http
-
-git:
-  - repo: https://github.com/nethserver/nethsecurity-docs
-    ref: main
-    shallow: true
-    out_dir: data/repos
+    max_depth: 4
+    timeout: 30

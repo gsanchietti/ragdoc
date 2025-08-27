@@ -1,24 +1,63 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Iterable
 
-import httpx
+from bs4 import BeautifulSoup
 
 from .models import HttpSource
-from .state import get_http_meta, set_http_meta
 from .utils import ensure_dir, safe_name
 
 logger = logging.getLogger(__name__)
 
 
+def bs4_extractor(html: str) -> str:
+    """Extract clean text from HTML using BeautifulSoup."""
+    soup = BeautifulSoup(html, "lxml")
+    return re.sub(r"\n\n+", "\n\n", soup.text).strip()
+
+
+def extract_title_from_html(html: str) -> str | None:
+    """Extract title from HTML using BeautifulSoup."""
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        
+        # Try to find title tag first
+        title_tag = soup.find("title")
+        if title_tag and title_tag.string:
+            title = title_tag.string.strip()
+            if title:
+                return title
+        
+        # If no title tag, try to find the first h1
+        h1_tag = soup.find("h1")
+        if h1_tag:
+            title = h1_tag.get_text(strip=True)
+            if title:
+                return title
+        
+        # Try h2 as fallback
+        h2_tag = soup.find("h2")
+        if h2_tag:
+            title = h2_tag.get_text(strip=True)
+            if title:
+                return title
+                
+        return None
+    except Exception:
+        return None
+
+
 class HttpFetcher:
-    def __init__(self, client: httpx.Client | None = None) -> None:
-        self._client = client or httpx.Client(follow_redirects=True, timeout=30.0)
+    def __init__(self) -> None:
+        # RecursiveUrlLoader manages its own HTTP client
+        pass
 
     def close(self) -> None:
-        self._client.close()
+        # Nothing to close with RecursiveUrlLoader
+        pass
 
     def fetch_many(self, sources: Iterable[HttpSource], out_root: Path) -> list[tuple[Path, str]]:
         outputs: list[tuple[Path, str]] = []
@@ -27,48 +66,56 @@ class HttpFetcher:
         return outputs
 
     def fetch_one(self, src: HttpSource, out_root: Path) -> list[tuple[Path, str]]:
-        from .state import load_state, save_state
-
-        state = load_state()
-        etag, last_mod = get_http_meta(state, src.url)
-
-        headers = {}
-        if etag:
-            headers["If-None-Match"] = etag
-        if last_mod:
-            headers["If-Modified-Since"] = last_mod
-
-        logger.info("HTTP GET %s", src.url)
-        resp = self._client.get(src.url, headers=headers)
-        if resp.status_code == 304:
-            logger.info("Not modified: %s", src.url)
+        try:
+            from langchain_community.document_loaders import RecursiveUrlLoader
+        except ImportError as e:
+            logger.error("RecursiveUrlLoader requires langchain-community: %s", e)
             return []
-        resp.raise_for_status()
 
-        # Update cache metadata if present
-        new_etag = resp.headers.get("ETag")
-        new_last_mod = resp.headers.get("Last-Modified")
+        logger.info("Recursive crawl starting from: %s", src.url)
+        
+        # Set up the recursive loader with parameters from HttpSource
+        loader = RecursiveUrlLoader(
+            src.url,
+            max_depth=getattr(src, "max_depth", 2),
+            extractor=lambda x: x,  # Keep raw HTML for title extraction
+            link_regex=getattr(src, "link_regex", None),
+            exclude_dirs=getattr(src, "exclude_dirs", ()),
+            timeout=getattr(src, "timeout", 10),
+            check_response_status=False,
+            continue_on_failure=True,
+            prevent_outside=True,
+        )
 
-        # Decide output file path
+        # Load documents
+        try:
+            docs = loader.load()
+        except Exception as e:
+            logger.error("Failed to load documents from %s: %s", src.url, e)
+            return []
+
+        # Save documents to files
+        outputs: list[tuple[Path, str]] = []
         out_dir = out_root / src.out_dir
         ensure_dir(out_dir)
-        fname = safe_name(src.url)
-        # Try to infer extension from content-type
-        ctype = resp.headers.get("Content-Type", "").lower()
-        if "text/html" in ctype:
-            ext = ".html"
-        elif "markdown" in ctype or "text/markdown" in ctype:
-            ext = ".md"
-        elif "rst" in ctype or "restructured" in ctype:
-            ext = ".rst"
-        elif "text/plain" in ctype:
-            ext = ".txt"
-        else:
-            ext = ""
-        out_file = out_dir / f"{fname}{ext}"
-        out_file.write_bytes(resp.content)
-        logger.info("Saved %s (%d bytes)", out_file, len(resp.content))
+        
+        for doc in docs:
+            url = doc.metadata.get("source", src.url)
+            fname = safe_name(url)
+            out_file = out_dir / f"{fname}.html"
+            
+            try:
+                # Extract title and clean content from raw HTML
+                raw_html = doc.page_content or ""
+                title = extract_title_from_html(raw_html)
+                clean_content = bs4_extractor(raw_html)
+                
+                # Save the original HTML content for proper processing later
+                out_file.write_text(raw_html, encoding="utf-8")
+                outputs.append((out_file, url))
+                logger.debug("Saved %s (%d chars) with title: %s", out_file, len(clean_content), title)
+            except Exception as ex:
+                logger.warning("Failed to save %s: %s", url, ex)
 
-        set_http_meta(state, src.url, new_etag, new_last_mod)
-        save_state(state)
-        return [(out_file, src.url)]
+        logger.info("Recursive crawl completed: %d pages from %s", len(outputs), src.url)
+        return outputs

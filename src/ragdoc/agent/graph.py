@@ -35,6 +35,72 @@ def _content_to_text(content: Any) -> str:
     return str(content).strip()
 
 
+def _translate_to_english(text: str) -> str:
+    """Translate text to English for database search if it's not already in English."""
+    if not text or not text.strip():
+        return text
+    
+    # Enhanced heuristic to detect if text is likely English
+    text_clean = text.lower().strip()
+    
+    # Common English function words and patterns
+    english_indicators = ['the', 'and', 'or', 'to', 'of', 'in', 'for', 'with', 'on', 'at', 'by', 'from', 'how', 'what', 'where', 'when', 'why', 'is', 'are', 'was', 'were', 'have', 'has', 'had', 'do', 'does', 'did', 'can', 'could', 'will', 'would', 'should']
+    
+    # Common non-English patterns that suggest translation is needed
+    non_english_patterns = [
+        # Italian
+        'come', 'configurare', 'dove', 'quando', 'perché', 'cosa', 'quale', 'sono', 'è', 'del', 'della', 'degli', 'delle',
+        # Spanish  
+        'cómo', 'configurar', 'dónde', 'cuándo', 'por qué', 'qué', 'cuál', 'es', 'son', 'del', 'de la', 'los', 'las',
+        # French
+        'comment', 'configurer', 'où', 'quand', 'pourquoi', 'quoi', 'quel', 'quelle', 'est', 'sont', 'du', 'de la', 'des',
+        # German
+        'wie', 'konfigurieren', 'wo', 'wann', 'warum', 'was', 'welche', 'ist', 'sind', 'der', 'die', 'das', 'den',
+        # Portuguese
+        'como', 'configurar', 'onde', 'quando', 'por que', 'o que', 'qual', 'é', 'são', 'do', 'da', 'dos', 'das'
+    ]
+    
+    has_english_words = any(word in text_clean for word in english_indicators)
+    has_non_english_words = any(pattern in text_clean for pattern in non_english_patterns)
+    
+    # If text is very short, don't translate
+    if len(text_clean) < 5:
+        logger.debug("Translation: skipping (too short): %r", text[:50])
+        return text
+    
+    # If text has clear non-English patterns, translate
+    if has_non_english_words:
+        logger.debug("Translation: non-English patterns detected: %r", text[:50])
+    # If text has English words and no non-English patterns, likely English
+    elif has_english_words and not has_non_english_words:
+        logger.debug("Translation: skipping (appears to be English): %r", text[:50])
+        return text
+    # For ambiguous cases, check if it's mostly ASCII and short
+    elif len(text_clean) < 15 and text.isascii():
+        logger.debug("Translation: skipping (short ASCII, likely English/technical): %r", text[:50])
+        return text
+    
+    try:
+        # Use ChatOpenAI for translation
+        llm = ChatOpenAI(model=os.getenv("RAGDOC_TRANSLATION_MODEL", "gpt-4o-mini"), temperature=0.0)
+        
+        translation_prompt = f"""Translate the following text to English. 
+If the text is already in English, return it unchanged.
+Only return the translated text, no explanations or additional text.
+
+Text to translate: {text}"""
+        
+        response = llm.invoke([HumanMessage(content=translation_prompt)])
+        translated = _content_to_text(response.content)
+        
+        logger.debug("Translation: %r -> %r", text[:50], translated[:50])
+        return translated
+        
+    except Exception as e:
+        logger.warning("Translation failed, using original text: %s", e)
+        return text
+
+
 # Agent State
 @dataclass
 class AgentState:
@@ -45,6 +111,11 @@ class AgentState:
     clarify_turns: int = 0
     contexts_placeholder: bool = False
     last_clarify_idx: Optional[int] = None
+    # Enhanced refinement state
+    refinement_history: list[dict[str, Any]] = field(default_factory=list)  # Track refinement attempts
+    best_confidence: float = 0.0  # Track best confidence achieved
+    query_keywords: list[str] = field(default_factory=list)  # Extracted keywords from user query
+    missing_info_types: list[str] = field(default_factory=list)  # Types of info to clarify
 
 
 def system_prompt(language: str = "it") -> str:
@@ -60,14 +131,210 @@ def system_prompt(language: str = "it") -> str:
     return base
 
 
+def analyze_retrieval_quality(contexts: list[dict[str, Any]], query: str) -> dict[str, Any]:
+    """Analyze the quality of retrieved contexts and suggest improvements."""
+    if not contexts or all(c.get("_placeholder") for c in contexts):
+        return {
+            "quality": "no_results",
+            "max_score": 0.0,
+            "avg_score": 0.0,
+            "suggestions": ["add_specifics", "use_different_terms", "provide_context"]
+        }
+    
+    non_placeholder = [c for c in contexts if not c.get("_placeholder")]
+    if not non_placeholder:
+        return {
+            "quality": "no_results", 
+            "max_score": 0.0,
+            "avg_score": 0.0,
+            "suggestions": ["add_specifics", "use_different_terms", "provide_context"]
+        }
+    
+    scores = [c.get("score", 0.0) for c in non_placeholder]
+    max_score = max(scores)
+    avg_score = sum(scores) / len(scores) if scores else 0.0
+    
+    # Analyze query keywords vs titles for relevance
+    query_words = set(query.lower().split())
+    title_words = set()
+    for c in non_placeholder[:3]:  # Top 3 results
+        title = (c.get("title") or "").lower()
+        title_words.update(title.split())
+    
+    keyword_overlap = len(query_words.intersection(title_words)) / max(len(query_words), 1)
+    
+    # Determine quality and suggestions
+    if max_score >= 0.8 and avg_score >= 0.6:
+        quality = "excellent"
+        suggestions = []
+    elif max_score >= 0.65 and avg_score >= 0.4:
+        quality = "good"
+        suggestions = ["be_more_specific"] if keyword_overlap < 0.3 else []
+    elif max_score >= 0.4:
+        quality = "fair"
+        suggestions = ["add_specifics", "use_technical_terms"] if keyword_overlap < 0.5 else ["provide_context"]
+    else:
+        quality = "poor"
+        suggestions = ["add_specifics", "use_different_terms", "provide_context", "check_spelling"]
+    
+    return {
+        "quality": quality,
+        "max_score": max_score,
+        "avg_score": avg_score,
+        "keyword_overlap": keyword_overlap,
+        "suggestions": suggestions
+    }
+
+
+def extract_query_info(query: str) -> dict[str, Any]:
+    """Extract keywords and identify missing information types from user query."""
+    if not query or not query.strip():
+        return {"keywords": [], "missing_types": ["topic", "context"]}
+    
+    # Simple keyword extraction (could be enhanced with NLP)
+    words = query.lower().split()
+    # Filter out common words
+    stop_words = {
+        "il", "la", "lo", "le", "gli", "i", "un", "una", "uno", "di", "da", "del", "della", "delle", "degli", "dei",
+        "che", "per", "con", "su", "in", "a", "come", "quando", "dove", "perché", "cosa", "quale", "quanto",
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from",
+        "how", "what", "where", "when", "why", "who", "which", "can", "could", "would", "should", "is", "are"
+    }
+    keywords = [w for w in words if len(w) > 2 and w not in stop_words]
+    
+    # Identify missing information types based on query analysis
+    missing_types = []
+    
+    # Check for product/service specificity
+    if not any(word in query.lower() for word in ["nethserver", "nethsecurity", "nextcloud", "webtop", "freepbx"]):
+        missing_types.append("product")
+    
+    # Check for version specificity
+    if not any(char.isdigit() for char in query):
+        missing_types.append("version")
+    
+    # Check for error context
+    if "error" in query.lower() or "errore" in query.lower():
+        if "log" not in query.lower() and "messaggio" not in query.lower() and "message" not in query.lower():
+            missing_types.append("error_details")
+    
+    # Check for configuration context
+    if any(word in query.lower() for word in ["config", "configur", "impost", "setup"]):
+        if not any(word in query.lower() for word in ["file", "dove", "where", "come", "how"]):
+            missing_types.append("config_location")
+    
+    # Generic context if query is very short
+    if len(keywords) < 2:
+        missing_types.append("context")
+    
+    return {"keywords": keywords, "missing_types": missing_types or ["specifics"]}
+
+
+def generate_targeted_question(state: AgentState, retrieval_analysis: dict[str, Any], query_info: dict[str, Any]) -> str:
+    """Generate a targeted clarifying question based on retrieval analysis and query info."""
+    suggestions = retrieval_analysis.get("suggestions", [])
+    missing_types = query_info.get("missing_types", [])
+    quality = retrieval_analysis.get("quality", "poor")
+    
+    # Language preference
+    if state.language == "en":
+        questions = {
+            "product": "Which specific product are you asking about? (e.g., NethServer, NethSecurity, Nextcloud, WebTop)",
+            "version": "What version are you using? This helps me find the right documentation.",
+            "error_details": "Can you share the exact error message or log entry you're seeing?",
+            "config_location": "Are you looking for where to find this setting, or how to configure it?",
+            "context": "Can you provide more context about what you're trying to achieve?",
+            "specifics": "Can you be more specific about what you need help with?",
+            "add_specifics": "I found some results, but they might not be exactly what you need. Can you add more specific details?",
+            "use_technical_terms": "Try using more technical terms or specific feature names to help me find better documentation.",
+            "use_different_terms": "I couldn't find good matches for your query. Could you try describing your issue differently?",
+            "provide_context": "What are you trying to accomplish? More context would help me find the right information.",
+            "check_spelling": "Please check if all product names and technical terms are spelled correctly."
+        }
+        fallback = "I need more details to find the right information for you. Can you elaborate on your question?"
+    else:
+        questions = {
+            "product": "Di quale prodotto specifico stai parlando? (es. NethServer, NethSecurity, Nextcloud, WebTop)",
+            "version": "Che versione stai utilizzando? Questo mi aiuta a trovare la documentazione corretta.",
+            "error_details": "Puoi condividere il messaggio di errore esatto o la voce di log che vedi?",
+            "config_location": "Stai cercando dove trovare questa impostazione, o come configurarla?",
+            "context": "Puoi fornire più contesto su quello che stai cercando di fare?",
+            "specifics": "Puoi essere più specifico su quello per cui hai bisogno di aiuto?",
+            "add_specifics": "Ho trovato alcuni risultati, ma potrebbero non essere esattamente quello che ti serve. Puoi aggiungere dettagli più specifici?",
+            "use_technical_terms": "Prova a usare termini più tecnici o nomi di funzionalità specifiche per aiutarmi a trovare documentazione migliore.",
+            "use_different_terms": "Non sono riuscito a trovare buone corrispondenze per la tua domanda. Potresti provare a descrivere il problema diversamente?",
+            "provide_context": "Cosa stai cercando di ottenere? Maggiore contesto mi aiuterebbe a trovare le informazioni giuste.",
+            "check_spelling": "Controlla che i nomi dei prodotti e i termini tecnici siano scritti correttamente."
+        }
+        fallback = "Ho bisogno di maggiori dettagli per trovare le informazioni giuste. Puoi approfondire la tua domanda?"
+    
+    # Priority order for questions
+    if "product" in missing_types:
+        return questions["product"]
+    elif "error_details" in missing_types:
+        return questions["error_details"]
+    elif "version" in missing_types and quality != "no_results":
+        return questions["version"]
+    elif "config_location" in missing_types:
+        return questions["config_location"]
+    elif "add_specifics" in suggestions and quality in ["fair", "good"]:
+        return questions["add_specifics"]
+    elif "use_different_terms" in suggestions:
+        return questions["use_different_terms"]
+    elif "use_technical_terms" in suggestions:
+        return questions["use_technical_terms"]
+    elif "provide_context" in suggestions:
+        return questions["provide_context"]
+    elif "check_spelling" in suggestions:
+        return questions["check_spelling"]
+    elif "context" in missing_types:
+        return questions["context"]
+    elif "specifics" in missing_types:
+        return questions["specifics"]
+    else:
+        return fallback
+
+
 def clarify_node(state: AgentState) -> AgentState:
-    # Ask one concise clarifying question (assistant message)
-    logger.debug("Node: clarify/start | turns=%s", state.clarify_turns)
-    question = (
-        "Per aiutarti, mi servono maggiori dettagli."
-    )
+    """Enhanced clarifying question node with targeted analysis."""
+    logger.debug("Node: clarify/start | turns=%s confidence=%.4f", state.clarify_turns, state.confidence or 0.0)
+    
+    # Get the current user query
+    current_query = ""
+    for m in reversed(state.messages):
+        if isinstance(m, HumanMessage):
+            current_query = _content_to_text(m.content)
+            break
+        elif isinstance(m, dict) and "content" in m:
+            current_query = _content_to_text(m.get("content"))
+            break
+    
+    # Analyze retrieval quality
+    retrieval_analysis = analyze_retrieval_quality(state.contexts, current_query)
+    
+    # Extract query information
+    query_info = extract_query_info(current_query)
+    
+    # Generate targeted question
+    question = generate_targeted_question(state, retrieval_analysis, query_info)
+    
+    # Record this refinement attempt
+    refinement_record = {
+        "turn": state.clarify_turns + 1,
+        "query": current_query[:100],  # Truncate for logging
+        "confidence": state.confidence or 0.0,
+        "quality": retrieval_analysis.get("quality"),
+        "suggestions": retrieval_analysis.get("suggestions", []),
+        "missing_types": query_info.get("missing_types", []),
+        "question": question[:100]  # Truncate for logging
+    }
+    
+    logger.debug("Node: clarify/analysis | quality=%s confidence=%.4f suggestions=%s", 
+                retrieval_analysis.get("quality"), state.confidence or 0.0, retrieval_analysis.get("suggestions", []))
+    
     msg = AIMessage(content=question)
-    logger.debug("Node: clarify/emit_question len(messages)=%s", len(state.messages))
+    logger.debug("Node: clarify/emit_question | turn=%d len(messages)=%s", state.clarify_turns + 1, len(state.messages))
+    
     return AgentState(
         messages=state.messages + [msg],
         language=state.language,
@@ -76,6 +343,10 @@ def clarify_node(state: AgentState) -> AgentState:
         clarify_turns=state.clarify_turns + 1,
         contexts_placeholder=state.contexts_placeholder,
         last_clarify_idx=len(state.messages),
+        refinement_history=state.refinement_history + [refinement_record],
+        best_confidence=max(state.best_confidence, state.confidence or 0.0),
+        query_keywords=query_info.get("keywords", []),
+        missing_info_types=query_info.get("missing_types", [])
     )
 
 
@@ -92,36 +363,20 @@ def retrieve_node(state: AgentState) -> AgentState:
             query = _content_to_text(m.get("content"))
             break
     if not query:
-        logger.debug("Node: retrieve/empty_query | inserting placeholder or reusing prior contexts")
-        contexts = state.contexts
-        placeholder = state.contexts_placeholder
-        if not contexts:
-            contexts = [
-                {
-                    "id": "placeholder",
-                    "_placeholder": True,
-                    "title": "Dettagli richiesti",
-                    "path": "",
-                    "url": "",
-                    "score": 0.0,
-                    "preview": "Fornisci maggiori dettagli per migliorare la ricerca.",
-                }
-            ]
-            placeholder = True
-        return AgentState(
-            messages=state.messages,
-            language=state.language,
-            contexts=contexts,
-            confidence=0.0,
-            clarify_turns=state.clarify_turns,
-            contexts_placeholder=placeholder,
-            last_clarify_idx=state.last_clarify_idx,
-        )
+        logger.debug("Node: retrieve/empty_query | attempting history-aware retrieval from previous messages")
+
+    # Translate query to English for better database search
+    original_query = query
+    if query:
+        query = _translate_to_english(query)
+        if query != original_query:
+            logger.debug("Node: retrieve/translated | original=%r translated=%r", original_query[:50], query[:50])
 
     cfg = RetrieverConfig(dsn=os.getenv("DATABASE_URL", ""))
     retriever = Retriever(cfg)
-    logger.debug("Node: retrieve/search | query=%r k=%s", query, int(os.getenv("RAGDOC_RETRIEVAL_TOP_K", "8")))
-    results = retriever.search(query, k=int(os.getenv("RAGDOC_RETRIEVAL_TOP_K", "8")))
+    k = int(os.getenv("RAGDOC_RETRIEVAL_TOP_K", "8"))
+    logger.debug("Node: retrieve/search | query=%r k=%s with_history=%s", query, k, True)
+    results = retriever.search(query or "", k=k, messages=state.messages)
     logger.debug(
         "Node: retrieve/results | found=%s top=%s",
         len(results),
@@ -177,6 +432,10 @@ def retrieve_node(state: AgentState) -> AgentState:
         clarify_turns=state.clarify_turns,
         contexts_placeholder=placeholder,
         last_clarify_idx=state.last_clarify_idx,
+        refinement_history=state.refinement_history,
+        best_confidence=max(state.best_confidence, confidence),
+        query_keywords=state.query_keywords,
+        missing_info_types=state.missing_info_types,
     )
 
 
@@ -218,13 +477,37 @@ def answer_node(state: AgentState) -> AgentState:
         clarify_turns=state.clarify_turns,
         contexts_placeholder=state.contexts_placeholder,
         last_clarify_idx=state.last_clarify_idx,
+        refinement_history=state.refinement_history,
+        best_confidence=state.best_confidence,
+        query_keywords=state.query_keywords,
+        missing_info_types=state.missing_info_types,
     )
 
 
 def escalate_node(state: AgentState) -> AgentState:
-    logger.debug("Node: escalate/start | turns=%s confidence=%s", state.clarify_turns, state.confidence)
-    msg = AIMessage(content="Sto passando il caso a un collega umano con il riepilogo delle evidenze raccolte.")
-    logger.debug("Node: escalate/done | appended AIMessage")
+    """Enhanced escalation with refinement history summary."""
+    logger.debug("Node: escalate/start | turns=%s confidence=%s best_confidence=%s", 
+                state.clarify_turns, state.confidence, state.best_confidence)
+    
+    # Build escalation message with refinement history
+    if state.language == "en":
+        base_msg = "I'm escalating this case to a human colleague with a summary of the information gathered."
+        if state.refinement_history:
+            base_msg += f"\n\nRefinement attempts made: {len(state.refinement_history)}"
+            base_msg += f"\nBest confidence achieved: {state.best_confidence:.2f}"
+            if state.query_keywords:
+                base_msg += f"\nKey terms identified: {', '.join(state.query_keywords[:5])}"
+    else:
+        base_msg = "Sto passando il caso a un collega umano con il riepilogo delle informazioni raccolte."
+        if state.refinement_history:
+            base_msg += f"\n\nTentativi di raffinamento effettuati: {len(state.refinement_history)}"
+            base_msg += f"\nMigliore confidenza raggiunta: {state.best_confidence:.2f}"
+            if state.query_keywords:
+                base_msg += f"\nTermini chiave identificati: {', '.join(state.query_keywords[:5])}"
+    
+    msg = AIMessage(content=base_msg)
+    logger.debug("Node: escalate/done | appended AIMessage with refinement summary")
+    
     return AgentState(
         messages=state.messages + [msg],
         language=state.language,
@@ -233,6 +516,10 @@ def escalate_node(state: AgentState) -> AgentState:
         clarify_turns=state.clarify_turns,
         contexts_placeholder=state.contexts_placeholder,
         last_clarify_idx=state.last_clarify_idx,
+        refinement_history=state.refinement_history,
+        best_confidence=state.best_confidence,
+        query_keywords=state.query_keywords,
+        missing_info_types=state.missing_info_types,
     )
 
 
@@ -250,39 +537,85 @@ def clarify_router(state: AgentState) -> str:
 
 
 def supervisor(state: AgentState) -> str:
-    # Policy:
-    # - If no contexts -> clarify
-    # - If confidence >= threshold -> answer
-    # - Else -> escalate
+    """Enhanced supervisor with improved decision logic."""
     threshold = float(os.getenv("RAGDOC_CONFIDENCE_THRESHOLD", "0.65"))
+    
+    # Check if we've reached the maximum number of iterations (5)
+    if state.clarify_turns >= 5:
+        decision = "escalate"
+        logger.debug(
+            "Supervisor: decision=%s | max_iterations_reached turns=%s",
+            decision,
+            state.clarify_turns,
+        )
+        return decision
+    
+    # If no contexts or only placeholders, need clarification
     if (not state.contexts) or state.contexts_placeholder:
-        # If we've already asked 5 times, escalate
-        if state.clarify_turns >= 5:
-            decision = "escalate"
-            logger.debug(
-                "Supervisor: decision=%s | empty_or_placeholder_contexts turns=%s",
-                decision,
-                state.clarify_turns,
-            )
-            return decision
         decision = "clarify"
         logger.debug("Supervisor: decision=%s | need more info", decision)
         return decision
-    if (state.confidence or 0.0) >= threshold:
+    
+    # Check confidence against threshold
+    current_confidence = state.confidence or 0.0
+    
+    # Enhanced decision logic: consider improvement trajectory
+    if current_confidence >= threshold:
         decision = "answer"
         logger.debug(
             "Supervisor: decision=%s | confidence=%.4f threshold=%.4f",
             decision,
-            (state.confidence or 0.0),
+            current_confidence,
             threshold,
         )
         return decision
-    decision = "escalate"
+    
+    # If we have made some clarify attempts, check if we're improving
+    if state.clarify_turns > 0:
+        # If confidence is improving and we haven't tried many times, continue
+        if current_confidence > state.best_confidence * 0.9 and state.clarify_turns < 3:
+            decision = "clarify"
+            logger.debug(
+                "Supervisor: decision=%s | improving_trajectory confidence=%.4f best=%.4f turn=%d",
+                decision,
+                current_confidence,
+                state.best_confidence,
+                state.clarify_turns,
+            )
+            return decision
+        
+        # If we have reasonable confidence but it's not perfect, try once more
+        elif current_confidence >= threshold * 0.8 and state.clarify_turns < 3:
+            decision = "clarify"
+            logger.debug(
+                "Supervisor: decision=%s | decent_confidence confidence=%.4f (80%% of threshold=%.4f) turn=%d",
+                decision,
+                current_confidence,
+                threshold * 0.8,
+                state.clarify_turns,
+            )
+            return decision
+    
+    # If confidence is too low and we've tried a few times, escalate
+    if current_confidence < threshold * 0.6:
+        decision = "escalate"
+        logger.debug(
+            "Supervisor: decision=%s | low_confidence=%.4f threshold=%.4f turns=%d",
+            decision,
+            current_confidence,
+            threshold,
+            state.clarify_turns,
+        )
+        return decision
+    
+    # Default: try to clarify if we haven't reached the limit
+    decision = "clarify"
     logger.debug(
-        "Supervisor: decision=%s | low confidence=%.4f threshold=%.4f",
+        "Supervisor: decision=%s | default_clarify confidence=%.4f threshold=%.4f turns=%d",
         decision,
-        (state.confidence or 0.0),
+        current_confidence,
         threshold,
+        state.clarify_turns,
     )
     return decision
 

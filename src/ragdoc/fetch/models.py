@@ -8,6 +8,14 @@ from typing import Optional
 class HttpSource:
     url: str
     out_dir: str
+    # Maximum depth for recursive crawling (default: 2)
+    max_depth: int = 2
+    # Custom link regex filter
+    link_regex: Optional[str] = None
+    # Directories to exclude
+    exclude_dirs: tuple[str, ...] = ()
+    # Request timeout
+    timeout: int = 10
 
 
 @dataclass(frozen=True)

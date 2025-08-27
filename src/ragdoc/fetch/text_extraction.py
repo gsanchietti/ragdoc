@@ -16,8 +16,72 @@ def html_to_text(content: bytes) -> str:
     return text
 
 
+def html_to_text_with_title(content: bytes) -> tuple[str, str | None]:
+    """Extract readable text and title from HTML bytes using BeautifulSoup."""
+    soup = BeautifulSoup(content, "html.parser")
+    
+    # Extract title
+    title = None
+    title_tag = soup.find("title")
+    if title_tag and title_tag.string:
+        title = title_tag.string.strip()
+    
+    # If no title tag, try to find the first h1
+    if not title:
+        h1_tag = soup.find("h1")
+        if h1_tag:
+            title = h1_tag.get_text(strip=True)
+    
+    # Try h2 as fallback
+    if not title:
+        h2_tag = soup.find("h2")
+        if h2_tag:
+            title = h2_tag.get_text(strip=True)
+    
+    # Remove script/style
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n", strip=True)
+    return text, title if title else None
+
+
 def read_markdown(path: Path, encoding: str = "utf-8") -> str:
     return path.read_text(encoding=encoding)
+
+
+def extract_title_from_markdown(content: str) -> str | None:
+    """Extract title from Markdown content."""
+    lines = content.split('\n')
+    
+    # Check for YAML front matter title
+    if lines and lines[0].strip() == '---':
+        in_frontmatter = True
+        for i, line in enumerate(lines[1:], 1):
+            if line.strip() == '---':
+                break
+            if line.strip().startswith('title:'):
+                title = line.split('title:', 1)[1].strip()
+                # Remove quotes if present
+                title = title.strip('"\'')
+                if title:
+                    return title
+    
+    # Look for first heading (# Title)
+    for line in lines:
+        line = line.strip()
+        if line.startswith('# '):
+            title = line[2:].strip()
+            if title:
+                return title
+    
+    return None
+
+
+def read_markdown_with_title(path: Path, encoding: str = "utf-8") -> tuple[str, str | None]:
+    """Read markdown file and extract title."""
+    content = path.read_text(encoding=encoding)
+    title = extract_title_from_markdown(content)
+    return content, title
 
 
 def chunk_text(text: str, max_chars: int = 8000) -> list[str]:

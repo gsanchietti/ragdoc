@@ -1,9 +1,28 @@
 # ragdoc
 
-Supervisor-driven RAG on Python 3.12. This repo includes fetching from HTTP and Git with caching, text extraction, embedding and indexing into Postgres+pgvector, a hybrid retriever with a test CLI, and a LangGraph agent with clarify → retrieve → answer/escalate.
+Supervisor-driven RAG on Python 3.12. This repo includes fetching from HTTP and Git with caching, text extraction, embedding and indexing into ### HTTP Recursive Crawling
+
+All HTTP sources are now crawled recursively using LangChain's RecursiveUrlLoader. This automatically:
+
+- Follows links within the same domain
+- Extracts clean text content from HTML pages
+- Respects the configured `max_depth` and `exclude_dirs`
+- Filters out binary files and external domains automatically
+
+Configure crawling behavior in your `configs/sources.yaml`:
+
+```yaml
+http:
+  - url: https://docs.example.com/
+    out_dir: data/raw/http
+    max_depth: 3                    # crawl up to 3 levels deep
+    exclude_dirs: ["api", "legacy"] # skip these URL paths
+    timeout: 15                     # request timeout in seconds
+    link_regex: ".*\\.html$"        # optional: only follow HTML links
+``` a hybrid retriever with a test CLI, and a LangGraph agent with clarify → retrieve → answer/escalate.
 
 ## Features
-- HTTP fetch with conditional requests (If-None-Match / If-Modified-Since)
+- HTTP recursive crawling using LangChain's RecursiveUrlLoader
 - Git clone/update using system `git` (shallow by default)
 - JSON-based local state cache under `.ragdoc/state.json`
 - Deterministic output directory structure under `data/`
@@ -11,9 +30,14 @@ Supervisor-driven RAG on Python 3.12. This repo includes fetching from HTTP and 
 - Text extraction and normalization for HTML, Markdown, plain text, and reStructuredText
 - Embedding via OpenAI (default `text-embedding-3-small`) and indexing in Postgres with `pgvector`
 - Idempotent upsert with provenance+content hash de-duplication
-- Hybrid Retriever (vector + simple lexical merge)
-- Test CLI `ragdoc-test query` for similarity search
-- LangGraph agent: clarify → retrieve → answer or escalate, with confidence threshold
+- Hybrid Retriever with advanced text search:
+  - Vector similarity search using OpenAI embeddings
+  - PostgreSQL full-text search (tsvector/ts_rank) with fallback to pattern matching
+  - Configurable weighting between vector and lexical scores
+  - Title boost for enhanced relevance of document titles
+  - Text-only result discovery (finds high-relevance text matches beyond top vector results)
+- Test CLI `ragdoc-test` with comprehensive hybrid search and debug logging
+- LangGraph agent: router → (intro|clarify|retrieve) → answer or escalate; confidence gating, automatic translation to English for database search, and history-aware retrieval
 
 ## Quickstart (with uv)
 
@@ -40,8 +64,12 @@ Edit `configs/sources.yaml`:
 http:
   - url: https://example.com/
     out_dir: data/raw/http
-  - url: https://raw.githubusercontent.com/psf/requests/main/README.md
+    max_depth: 2          # optional; default 2
+    timeout: 10           # optional; default 10 seconds
+  - url: https://docs.python.org/3.12/
     out_dir: data/raw/http
+    max_depth: 3
+    exclude_dirs: ["_downloads", "_static"]  # optional; skip these paths
 
 git:
   - repo: https://github.com/python/cpython.git
@@ -65,24 +93,117 @@ Outputs will be placed under `data/` and state under `.ragdoc/state.json`.
 5) Test retrieval via CLI
 
 ```bash
-ragdoc-test query \
-  --dsn "$DATABASE_URL" \
+# Basic hybrid search test with BM25 sparse vectors
+ragdoc-test query "How do I configure pgvector?" \
   --k 8 \
-  --alpha 0.7 \
-  --query "How do I configure pgvector?"
+  --database-url "$DATABASE_URL"
+
+# Advanced hybrid search with custom parameters and debug logging
+ragdoc-test query "database configuration" \
+  --k 10 \
+  --alpha 0.6 \
+  --title-boost 2.0 \
+  --sparse-weight 0.4 \
+  --bm25-k1 1.5 \
+  --debug \
+  --database-url "$DATABASE_URL"
+
+# Disable BM25 sparse vector search (use only dense vectors + lexical)
+ragdoc-test query "machine learning models" \
+  --no-bm25 \
+  --alpha 0.8 \
+  --database-url "$DATABASE_URL"
 ```
+
+The test CLI always executes hybrid search combining:
+- Dense vector similarity search using OpenAI embeddings
+- PostgreSQL full-text search with tsvector/ts_rank  
+- BM25 sparse vector search for keyword-based matching
+- Text-only result discovery for comprehensive coverage
+- Configurable three-way scoring balance via `--alpha` and `--sparse-weight` parameters
 
 6) Run the chat (LangGraph prebuilt UI)
 
 ```bash
 export RAGDOC_CONFIDENCE_THRESHOLD=0.65   # optional
 export RAGDOC_RETRIEVAL_TOP_K=8           # optional
-langgraph dev apps/chat/graph.py
+export RAGDOC_INFO_CONF_THRESHOLD=0.35    # optional, router confidence to proceed to retrieve
+export RAGDOC_LOG_LEVEL=DEBUG             # optional, verbose agent logs
+
+# BM25 Sparse Vector Search Configuration (optional)
+export RAGDOC_RETRIEVAL_USE_BM25=true     # enable BM25 sparse vectors (default: true)
+export RAGDOC_RETRIEVAL_BM25_K1=1.2       # term frequency saturation (default: 1.2)
+export RAGDOC_RETRIEVAL_BM25_B=0.75       # length normalization (default: 0.75)
+export RAGDOC_RETRIEVAL_SPARSE_WEIGHT=0.3 # sparse vector weight in hybrid search (default: 0.3)
+
+# Use langgraph.json: this will start a dev server and open a browser page to https://smith.langchain.com/
+langgraph dev
 ```
+
+## Enhanced Retriever
+
+The hybrid retriever combines vector similarity with advanced text search and BM25 sparse vector search:
+
+### Search Methods
+1. **Vector Search**: Uses OpenAI embeddings with cosine similarity
+2. **Full-Text Search**: PostgreSQL `tsvector`/`ts_rank` for natural language queries
+3. **BM25 Sparse Vector Search**: Keyword-based search using BM25 algorithm for sparse embeddings
+4. **Pattern Matching**: Fallback ILIKE search for exact phrases and keywords
+5. **Text-Only Discovery**: Finds high-relevance documents that might not appear in top vector results
+
+### Configuration Options
+- `alpha`: Weight between vector (default: 0.7) and lexical (0.3) scores
+- `use_fts`: Enable PostgreSQL full-text search (default: True)
+- `fts_language`: Language for FTS stemming (default: "english")
+- `title_boost`: Multiplier for title matches (default: 1.5)
+- `use_bm25`: Enable BM25 sparse vector search (default: True)
+- `bm25_k1`: BM25 term frequency saturation parameter (default: 1.2)
+- `bm25_b`: BM25 length normalization parameter (default: 0.75)
+- `sparse_weight`: Weight for sparse vector component in hybrid search (default: 0.3)
+
+### BM25 Sparse Vector Search
+BM25 (Best Matching 25) implements keyword-based sparse vector search using TF-IDF principles:
+
+- **Sparse Embeddings**: Generates vectors where most values are zero except for relevant terms
+- **TF-IDF Foundation**: Built on Term Frequency-Inverse Document Frequency with BM25 improvements
+- **Saturation Function**: Uses k1 parameter to control term frequency saturation
+- **Length Normalization**: Uses b parameter to normalize document length bias
+- **Hybrid Integration**: Combines with dense vectors and lexical search for optimal results
+
+### How It Works
+1. **Query Translation**: Automatically translates non-English queries to English for optimal database search
+2. Gets top vector similarity results using dense embeddings
+3. Runs parallel text search across title and content fields
+4. Computes BM25 sparse vector scores for keyword matching
+5. Combines all result sets with configurable three-way weighting (dense + lexical + sparse)
+6. Applies title boost for documents with query terms in titles
+7. Returns deduplicated results ranked by combined hybrid score
+
+## Automatic Query Translation
+
+The agent automatically translates non-English queries to English before searching the database, ensuring optimal retrieval performance regardless of the query language.
+
+### Translation Logic
+- **Smart Detection**: Uses linguistic heuristics to identify non-English text patterns
+- **Multi-language Support**: Recognizes Italian, Spanish, French, German, Portuguese, and other languages
+- **Conservative Approach**: Only translates when confident the text is non-English
+- **Graceful Fallback**: If translation fails, uses the original query
+
+### Supported Languages
+The translation detection supports common patterns from:
+- Italian: "Come configurare...", "Dove si trova..."
+- Spanish: "Cómo configurar...", "Dónde está..."  
+- French: "Comment configurer...", "Où se trouve..."
+- German: "Wie konfigurieren...", "Wo befindet sich..."
+- Portuguese: "Como configurar...", "Onde fica..."
+- And more through OpenAI's translation capabilities
+
+### Configuration
+Use `RAGDOC_TRANSLATION_MODEL` to specify the model for translation (default: `gpt-4o-mini`)
 
 ## Environment
 - Python: 3.12
-- Dependencies: `httpx`, `PyYAML`, `beautifulsoup4`, `openai`, `psycopg[binary]`, `pgvector`, `docutils`, `langgraph`, `langchain-core`, `langchain-openai`
+- Dependencies: `httpx`, `PyYAML`, `beautifulsoup4`, `lxml`, `openai`, `psycopg[binary]`, `pgvector`, `docutils`, `langgraph`, `langchain-core`, `langchain-openai`, `langchain-community`
 - A Postgres instance with the `vector` extension is required for indexing. Fetch-only still works without DB (files + local state).
 
 ### Configuration (env)
@@ -90,9 +211,19 @@ langgraph dev apps/chat/graph.py
 - `OPENAI_API_KEY`
 - `RAGDOC_EMBEDDING_MODEL` (default: `text-embedding-3-small`)
 - `RAGDOC_EMBEDDING_DIM` (default: `1536`)
+- `RAGDOC_EMBEDDING_MAX_TOKENS` (default: `8000`)
 - `RAGDOC_RETRIEVAL_TOP_K` (default: `8`)
+- `RAGDOC_RETRIEVAL_ALPHA` (default: `0.7`)
+- `RAGDOC_RETRIEVAL_TITLE_BOOST` (default: `1.5`)
+- `RAGDOC_RETRIEVAL_USE_FTS` (default: `true`)
+- `RAGDOC_RETRIEVAL_FTS_LANGUAGE` (default: `english`)
 - `RAGDOC_CONFIDENCE_THRESHOLD` (default: `0.65`)
 - `RAGDOC_ANSWER_MODEL` (default: `gpt-4o-mini`)
+- `RAGDOC_TRANSLATION_MODEL` (default: `gpt-4o-mini`) - Model used for translating queries to English
+- `RAGDOC_INFO_CONF_THRESHOLD` (default: `0.35`)
+- `RAGDOC_RETRIEVAL_HISTORY_CHARS` (default: `800`)
+- `RAGDOC_RETRIEVAL_HISTORY_PARTS` (default: `6`)
+- `RAGDOC_LOG_LEVEL` (default: `INFO`)
 
 ## Run Postgres + pgvector in a container
 
@@ -131,15 +262,35 @@ Notes:
 - Adjust ports/credentials as needed; the example uses a named volume `ragdoc-pgdata` for persistence.
 
 ## Notes
-- The job avoids re-downloading unchanged HTTP resources using ETag/Last-Modified when available.
+- HTTP crawling recursively follows links up to the specified max_depth (default: 2).
 - Git operations use the local `git` executable; ensure it’s installed and available on PATH.
 - Network credentials or private repo access are not handled in this minimal version.
- - Vectorization uses OpenAI embeddings. See env vars to customize model/dim.
- - Postgres must have the `vector` extension available. The table `ragdoc_embeddings` will be created if missing, with a unique constraint on (source_type, source_url, path, content_sha256).
- - The agent asks one clarifying question when needed and loops back to retrieval. It routes to answer vs. escalate based on `RAGDOC_CONFIDENCE_THRESHOLD`.
+- Vectorization uses OpenAI embeddings. See env vars to customize model/dim.
+- Postgres must have the `vector` extension available. The table `ragdoc_embeddings` will be created if missing, with a unique constraint on (source_type, source_url, path, content_sha256).
+- The agent introduces itself (router), asks clarifying questions with human-in-the-loop, and uses conversation history to form retrieval queries; it then answers or escalates based on `RAGDOC_CONFIDENCE_THRESHOLD`.
+
+### Crawl whole sites via sitemap
+
+You can enable sitemap-based recursive fetching for a whole site using LangChain’s SitemapLoader.
+
+Add to your `configs/sources.yaml`:
+
+```yaml
+http:
+  - url: https://example.com/
+    out_dir: data/raw/http
+    sitemap: true                # enable sitemap crawl
+    # sitemap_url: https://example.com/sitemap.xml  # optional override
+```
+
+Notes:
+- Requires `langchain-community` (included). The fetcher reads the sitemap and saves each page under `out_dir` as `.html`.
+- Non-HTML assets like images/PDFs are skipped by default.
+- ETag/Last-Modified caching applies to single-URL fetches; sitemap mode stores pages directly.
 
 ## Roadmap (next steps)
 - Add PDF parsing
-- Upgrade lexical retrieval to Postgres FTS (tsvector/ts_rank) and add recency/domain filters
+- ~~Upgrade lexical retrieval to Postgres FTS (tsvector/ts_rank)~~ ✅ **Completed**
+- Add recency/domain filters and metadata-based filtering
 - Confidence calibration and evaluation harness
 - Containerization for the agent service and healthcheck endpoint

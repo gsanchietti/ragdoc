@@ -11,7 +11,7 @@ import yaml
 from .http_fetcher import HttpFetcher
 from .git_fetcher import GitRepoFetcher
 from .models import FetchConfig, GitSource, HttpSource
-from .text_extraction import html_to_text, chunk_text, read_by_suffix
+from .text_extraction import html_to_text, html_to_text_with_title, chunk_text, read_by_suffix, read_markdown_with_title, extract_title_from_markdown
 from .indexer import EmbeddingClient, PgVectorIndexer, EmbeddingChunk
 
 
@@ -78,11 +78,12 @@ def main(argv: list[str] | None = None) -> int:
         for path, url in http_outputs:
             content = path.read_bytes()
             if path.suffix.lower() in {".html", ".htm"}:
-                text = html_to_text(content)
+                text, title = html_to_text_with_title(content)
             else:
                 text = read_by_suffix(path)
+                title = None
             for chunk in chunk_text(text):
-                http_chunks.append(EmbeddingChunk(text=chunk, source_type="http", source_url=url, path=str(path)))
+                http_chunks.append(EmbeddingChunk(text=chunk, source_type="http", source_url=url, path=str(path), title=title))
 
         _index_chunks_batched(http_chunks, embedder, indexer)
 
@@ -101,14 +102,21 @@ def main(argv: list[str] | None = None) -> int:
                     if not p.is_file():
                         continue
                     logging.info("Reading %s", p)
-                    text = read_by_suffix(p)
+                    
+                    # Extract title based on file type
+                    title = None
+                    if p.suffix.lower() in {".md", ".markdown"}:
+                        text, title = read_markdown_with_title(p)
+                    else:
+                        text = read_by_suffix(p)
+                    
                     stype = {
                         ".md": "md",
                         ".markdown": "md",
                         ".rst": "rst",
                     }.get(p.suffix.lower(), "txt")
                     for chunk in chunk_text(text):
-                        content_chunks.append(EmbeddingChunk(text=chunk, source_type=stype, path=str(p)))
+                        content_chunks.append(EmbeddingChunk(text=chunk, source_type=stype, path=str(p), title=title))
 
         _index_chunks_batched(content_chunks, embedder, indexer)
     finally:
@@ -122,7 +130,7 @@ if __name__ == "__main__":
 
 
 def _index_chunks_batched(
-    chunks: list[EmbeddingChunk], embedder: EmbeddingClient, indexer: PgVectorIndexer, batch_size: int = 128
+    chunks: list[EmbeddingChunk], embedder: EmbeddingClient, indexer: PgVectorIndexer, batch_size: int = 32
 ) -> None:
     if not chunks:
         return
