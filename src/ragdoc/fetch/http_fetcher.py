@@ -75,14 +75,17 @@ class HttpFetcher:
         logger.info("Recursive crawl starting from: %s", src.url)
         
         # Set up the recursive loader with parameters from HttpSource
+        link_regex = getattr(src, "link_regex", None)
+        if link_regex is not None and not isinstance(link_regex, re.Pattern):
+            link_regex = re.compile(link_regex)
         loader = RecursiveUrlLoader(
             src.url,
             max_depth=getattr(src, "max_depth", 2),
             extractor=lambda x: x,  # Keep raw HTML for title extraction
-            link_regex=getattr(src, "link_regex", None),
+            link_regex=link_regex,
             exclude_dirs=getattr(src, "exclude_dirs", ()),
             timeout=getattr(src, "timeout", 10),
-            check_response_status=False,
+            check_response_status=True,
             continue_on_failure=True,
             prevent_outside=True,
         )

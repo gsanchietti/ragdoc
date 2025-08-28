@@ -40,6 +40,7 @@ A hybrid retriever with a test CLI, and a LangGraph agent with clarify → retri
   - Text-only result discovery (finds high-relevance text matches beyond top vector results)
 - Test CLI `ragdoc-test` with comprehensive hybrid search, interactive chat interface, and debug logging
 - LangGraph agent: router → (intro|clarify|retrieve) → answer or escalate; confidence gating, automatic translation to English for database search, and history-aware retrieval
+- Ticket Agent: Freshdesk integration to process individual support tickets into tutorial markdown files with AI-powered translation and analysis
 
 ## Quickstart (with uv)
 
@@ -82,9 +83,21 @@ git:
 
 4) Run fetch + index job (requires Postgres + OpenAI key)
 
+Environment variables can be set manually or via a `.env` file:
+
 ```bash
+# Option 1: Export environment variables manually
 export DATABASE_URL="postgresql+psycopg://user:pass@host:5432/ragdoc"
 export OPENAI_API_KEY="sk-..."
+
+# Option 2: Create .env file (recommended)
+# Copy .env.example to .env and fill in your values
+cp .env.example .env
+# Edit .env with your database and API credentials
+```
+
+Fetch and index all configured sources, plus markdown files:
+```
 ragdoc-fetch --config configs/sources.yaml \
   --root data/repos \
   --glob "**/*.md"
@@ -156,6 +169,60 @@ export RAGDOC_RETRIEVAL_SPARSE_WEIGHT=0.3 # sparse vector weight in hybrid searc
 # Use langgraph.json: this will start a dev server and open a browser page to https://smith.langchain.com/
 langgraph dev
 ```
+
+## Ticket Agent (ragdoc-ticket-agent)
+
+RAGDoc includes a specialized AI agent for processing individual Freshdesk support tickets into tutorial markdown files. This tool automatically fetches a specific ticket, translates it to English if needed, analyzes the content, and generates structured tutorial documentation.
+
+
+See [TICKET_AGENT](TICKET_AGENT.md) for details.
+
+### Usage
+
+```bash
+# Process a specific ticket by ID
+ragdoc-ticket-agent 12345
+
+# Use a custom template
+ragdoc-ticket-agent 12345 --template my_template.md
+
+# Specify output directory
+ragdoc-ticket-agent 12345 --output-dir tutorials/
+```
+
+### Features
+
+- **Single Ticket Processing**: Simple, direct approach for processing one ticket at a time
+- **Automatic Translation**: Detects and translates non-English tickets to English
+- **AI-Powered Analysis**: Uses OpenAI to analyze ticket content and generate insights
+- **Quality Filtering**: Only processes tickets that meet quality criteria (sufficient content, clear issues)
+- **Structured Output**: Generates markdown tutorials with consistent formatting
+- **Template System**: Uses configurable template from `configs/tutorial_template.md`
+- **Environment Configuration**: Reads all settings from `.env` file with command-line overrides
+- **Integration Ready**: Generated tutorials can be indexed by ragdoc for retrieval
+
+### Integration with RAGDoc
+
+After generating tutorials, you can integrate them into your RAGDoc knowledge base:
+
+1) Add the tutorial directory to your `configs/sources.yaml`:
+
+```yaml
+http:
+  - url: file:///path/to/tutorials/
+    out_dir: data/raw/tutorials
+    # other config...
+```
+
+2) Run the ragdoc fetch process:
+
+```bash
+ragdoc-fetch --config configs/sources.yaml
+```
+
+3) The tutorials will be available for retrieval in the main RAGDoc system.
+
+For detailed configuration and troubleshooting, see `TICKET_AGENT.md`.
 
 ## Using with Agent Chat UI
 

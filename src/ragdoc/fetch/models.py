@@ -1,7 +1,21 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional
+
+
+def _load_env_config():
+    """Load environment variables from .env file if available."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass  # dotenv not available, environment variables must be set manually
+
+
+# Load .env configuration at module import
+_load_env_config()
 
 
 @dataclass(frozen=True)

@@ -7,8 +7,12 @@ from docutils.core import publish_parts
 
 
 def html_to_text(content: bytes) -> str:
-    """Extract readable text from HTML bytes using BeautifulSoup."""
+    """Extract readable text from HTML bytes using BeautifulSoup, excluding sidebars and navigation."""
     soup = BeautifulSoup(content, "html.parser")
+    
+    # Remove common sidebar and navigation elements
+    _remove_sidebar_elements(soup)
+    
     # Remove script/style
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
@@ -17,10 +21,10 @@ def html_to_text(content: bytes) -> str:
 
 
 def html_to_text_with_title(content: bytes) -> tuple[str, str | None]:
-    """Extract readable text and title from HTML bytes using BeautifulSoup."""
+    """Extract readable text and title from HTML bytes using BeautifulSoup, excluding sidebars and navigation."""
     soup = BeautifulSoup(content, "html.parser")
     
-    # Extract title
+    # Extract title before removing elements
     title = None
     title_tag = soup.find("title")
     if title_tag and title_tag.string:
@@ -38,11 +42,95 @@ def html_to_text_with_title(content: bytes) -> tuple[str, str | None]:
         if h2_tag:
             title = h2_tag.get_text(strip=True)
     
+    # Remove common sidebar and navigation elements
+    _remove_sidebar_elements(soup)
+    
     # Remove script/style
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
     text = soup.get_text(separator="\n", strip=True)
     return text, title if title else None
+
+
+def _remove_sidebar_elements(soup: BeautifulSoup) -> None:
+    """Remove common sidebar, navigation, and non-content elements from HTML soup."""
+    # Remove elements by common class names and IDs
+    sidebar_selectors = [
+        # Common sidebar classes and IDs
+        'aside', 'nav', '.sidebar', '.navigation', '.nav', '.menu',
+        '#sidebar', '#navigation', '#nav', '#menu',
+        '.side-nav', '.side-menu', '.side-bar', '.left-nav', '.right-nav',
+        '.navbar', '.nav-bar', '.header-nav', '.footer-nav',
+        
+        # Common content-filtering classes
+        '.advertisement', '.ads', '.banner', '.promotion',
+        '.related', '.related-posts', '.related-articles',
+        '.breadcrumb', '.breadcrumbs', '.pagination',
+        '.share', '.social', '.social-share', '.social-media',
+        '.comments', '.comment-section', '.comment-form',
+        '.footer', '.site-footer', '.page-footer',
+        '.header', '.site-header', '.page-header',
+        
+        # Common utility classes
+        '.skip-link', '.sr-only', '.screen-reader-text',
+        '.hidden', '.invisible', '.collapse',
+        
+        # Documentation-specific elements
+        '.toc', '.table-of-contents', '.page-toc',
+        '.edit-page', '.edit-link', '.last-modified',
+        '.version-selector', '.lang-selector',
+        '.search-form', '.search-box', '.search-input',
+        
+        # CMS and framework specific
+        '.widget', '.module', '.block',
+        '.drupal-sidebar', '.wp-sidebar',
+        '.mkdocs-nav', '.sphinx-sidebar',
+    ]
+    
+    # Remove elements by tag name
+    for tag_name in ['aside', 'nav']:
+        for element in soup.find_all(tag_name):
+            element.decompose()
+    
+    # Remove elements by selector
+    for selector in sidebar_selectors:
+        try:
+            for element in soup.select(selector):
+                element.decompose()
+        except Exception:
+            # Ignore CSS selector parsing errors
+            continue
+    
+    # Remove elements with role attributes that indicate navigation
+    nav_roles = ['navigation', 'banner', 'complementary', 'contentinfo']
+    for role in nav_roles:
+        for element in soup.find_all(attrs={'role': role}):
+            element.decompose()
+    
+    # Remove elements that are likely to be sidebars based on their position/structure
+    # Find elements with common sidebar patterns
+    for element in soup.find_all(['div', 'section']):
+        # Check if element has sidebar-like characteristics
+        classes = element.get('class', [])
+        element_id = element.get('id', '')
+        
+        if isinstance(classes, list):
+            class_str = ' '.join(classes).lower()
+        else:
+            class_str = str(classes).lower()
+        
+        # Check for sidebar indicators in class names or IDs
+        sidebar_indicators = [
+            'sidebar', 'nav', 'menu', 'aside', 'widget', 'toc',
+            'breadcrumb', 'related', 'share', 'social', 'comment',
+            'footer', 'header', 'banner', 'advertisement', 'ad'
+        ]
+        
+        is_sidebar = any(indicator in class_str or indicator in element_id.lower() 
+                        for indicator in sidebar_indicators)
+        
+        if is_sidebar:
+            element.decompose()
 
 
 def read_markdown(path: Path, encoding: str = "utf-8") -> str:

@@ -749,7 +749,6 @@ def answer_router(state: AgentState) -> Literal["wait", "retrieve"]:
 
 def build_graph() -> Any:
     from typing import Any as _Any
-    import os
 
     graph = StateGraph(AgentState)
     logger.debug("Graph: build/start")

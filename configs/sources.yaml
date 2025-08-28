@@ -1,8 +1,10 @@
 http:
-  # - url: https://docs.nethsecurity.org/en/latest/
-  #   out_dir: data/raw/http
-  #   max_depth: 10
-  #   timeout: 30
+  - url: https://docs.nethsecurity.org/en/latest/
+    out_dir: data/raw/http
+    max_depth: 10
+    timeout: 30
+    link_regex: '<a\s+(?:[^>]*?\s+)?href="([^"]*(?=html)[^"]*)"'
+    exclude_dirs: ["https://docs.nethsecurity.org/en/latest/_static"]
   # - url: https://dev.nethsecurity.org/
   #   out_dir: data/raw/http
   #   max_depth: 10
@@ -11,11 +13,11 @@ http:
   #   out_dir: data/raw/http
   #   max_depth: 4
   #   timeout: 30
-  - url: https://openwrt.org/docs/guide-user/base-system/managing_services
-    out_dir: data/raw/http
-    max_depth: 1
-    timeout: 30
-  - url: https://openwrt.org/docs/guide-user/additional-software/opkg
-    out_dir: data/raw/http
-    max_depth: 1
-    timeout: 30
+  # - url: https://openwrt.org/docs/guide-user/base-system/managing_services
+  #   out_dir: data/raw/http
+  #   max_depth: 1
+  #   timeout: 30
+  # - url: https://openwrt.org/docs/guide-user/additional-software/opkg
+  #   out_dir: data/raw/http
+  #   max_depth: 1
+  #   timeout: 30

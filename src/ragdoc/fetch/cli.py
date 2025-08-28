@@ -23,10 +23,17 @@ def _parse_config(path: Path) -> FetchConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Load .env file early to ensure environment variables are available for defaults
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass  # dotenv not available, environment variables must be set manually
+    
     parser = argparse.ArgumentParser(description="ragdoc fetch job")
     parser.add_argument("--config", required=True, type=Path, help="Path to YAML config file")
     parser.add_argument("--out-root", default=Path("."), type=Path, help="Project root for outputs")
-    parser.add_argument("--log-level", default="INFO", help="Logging level")
+    parser.add_argument("--log-level", default=os.getenv("RAGDOC_LOG_LEVEL", "INFO"), help="Logging level")
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL", ""), help="Postgres DSN (or set DATABASE_URL)")
     parser.add_argument(
         "--glob",
@@ -73,21 +80,33 @@ def main(argv: list[str] | None = None) -> int:
         indexer = PgVectorIndexer(db_url)
         embedder = EmbeddingClient()
 
-        # Index fetched HTTP pages
-        http_chunks: list[EmbeddingChunk] = []
+        # Index fetched HTTP pages - one document at a time
+        total_http_chunks = 0
         for path, url in http_outputs:
             content = path.read_bytes()
             if path.suffix.lower() in {".html", ".htm"}:
                 text, title = html_to_text_with_title(content)
+                source_type = "http"
             else:
                 text = read_by_suffix(path)
                 title = None
-            for chunk in chunk_text(text):
-                http_chunks.append(EmbeddingChunk(text=chunk, source_type="http", source_url=url, path=str(path), title=title))
+                source_type = "http"
+            
+            # Index this document individually
+            chunks_indexed = indexer.index_document(
+                source_type=source_type,
+                source_url=url,
+                path=str(path),
+                title=title,
+                text=text,
+                embedder=embedder
+            )
+            total_http_chunks += chunks_indexed
 
-        _index_chunks_batched(http_chunks, embedder, indexer)
+        logging.info("HTTP indexing completed: %d total chunks indexed from %d documents", 
+                    total_http_chunks, len(http_outputs))
 
-        # Index content files (txt/md/rst) with configurable globs and roots
+        # Index content files (txt/md/rst) with configurable globs and roots - one document at a time
         globs: list[str] = args.glob
         roots: list[Path] = [Path(p) for p in (args.root or [])]
         if not roots:
@@ -95,7 +114,8 @@ def main(argv: list[str] | None = None) -> int:
             default_repo_dirs = {(out_root / (s.out_dir or "data/repos")) for s in cfg.git}
             roots = list(default_repo_dirs) if default_repo_dirs else [out_root]
 
-        content_chunks: list[EmbeddingChunk] = []
+        total_content_chunks = 0
+        documents_processed = 0
         for root in roots:
             for pattern in globs:
                 for p in root.rglob(pattern):
@@ -107,18 +127,27 @@ def main(argv: list[str] | None = None) -> int:
                     title = None
                     if p.suffix.lower() in {".md", ".markdown"}:
                         text, title = read_markdown_with_title(p)
+                        source_type = "md"
                     else:
                         text = read_by_suffix(p)
+                        source_type = {
+                            ".rst": "rst",
+                        }.get(p.suffix.lower(), "txt")
                     
-                    stype = {
-                        ".md": "md",
-                        ".markdown": "md",
-                        ".rst": "rst",
-                    }.get(p.suffix.lower(), "txt")
-                    for chunk in chunk_text(text):
-                        content_chunks.append(EmbeddingChunk(text=chunk, source_type=stype, path=str(p), title=title))
+                    # Index this document individually
+                    chunks_indexed = indexer.index_document(
+                        source_type=source_type,
+                        source_url="",  # No source URL for local files
+                        path=str(p),
+                        title=title,
+                        text=text,
+                        embedder=embedder
+                    )
+                    total_content_chunks += chunks_indexed
+                    documents_processed += 1
 
-        _index_chunks_batched(content_chunks, embedder, indexer)
+        logging.info("Content indexing completed: %d total chunks indexed from %d documents", 
+                    total_content_chunks, documents_processed)
     finally:
         http.close()
 
@@ -127,17 +156,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-def _index_chunks_batched(
-    chunks: list[EmbeddingChunk], embedder: EmbeddingClient, indexer: PgVectorIndexer, batch_size: int = 32
-) -> None:
-    if not chunks:
-        return
-    logging.info("Indexing %d chunks", len(chunks))
-    i = 0
-    while i < len(chunks):
-        batch = chunks[i : i + batch_size]
-        vectors = embedder.embed_batch([c.text for c in batch])
-        indexer.upsert(batch, vectors)
-        i += batch_size

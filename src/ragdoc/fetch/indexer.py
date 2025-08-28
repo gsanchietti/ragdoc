@@ -11,6 +11,9 @@ import psycopg
 from openai import OpenAI
 from pgvector.psycopg import register_vector
 
+# Import models to ensure .env is loaded early
+from . import models
+
 
 DEFAULT_MODEL = os.getenv("RAGDOC_EMBEDDING_MODEL", "text-embedding-3-small")
 DEFAULT_DIM = int(os.getenv("RAGDOC_EMBEDDING_DIM", "1536"))
@@ -173,3 +176,47 @@ class PgVectorIndexer:
                     )
                     count += cur.rowcount if cur.rowcount is not None else 0
         return count
+
+    def index_document(self, source_type: str, source_url: str, path: str, title: str | None, 
+                      text: str, metadata: dict | None = None, embedder: EmbeddingClient | None = None) -> int:
+        """Index a single document by chunking it and embedding each chunk individually.
+        
+        Returns the number of chunks indexed for this document.
+        """
+        if not embedder:
+            embedder = EmbeddingClient()
+        
+        from .text_extraction import chunk_text
+        
+        # Chunk the document text
+        chunks_text = chunk_text(text)
+        if not chunks_text:
+            logger.warning("No chunks generated for document: %s", path)
+            return 0
+        
+        logger.debug("Document %s chunked into %d pieces", path, len(chunks_text))
+        
+        # Create EmbeddingChunk objects for this document
+        document_chunks = []
+        for chunk_text in chunks_text:
+            chunk = EmbeddingChunk(
+                text=chunk_text,
+                source_type=source_type,
+                source_url=source_url,
+                path=path,
+                title=title,
+                metadata=metadata
+            )
+            document_chunks.append(chunk)
+        
+        # Generate embeddings for all chunks of this document
+        chunk_texts = [chunk.text for chunk in document_chunks]
+        embeddings = embedder.embed_batch(chunk_texts)
+        
+        # Index all chunks for this document
+        indexed_count = self.upsert(document_chunks, embeddings)
+        
+        logger.info("Indexed document %s: %d chunks processed, %d new chunks added", 
+                   path, len(document_chunks), indexed_count)
+        
+        return indexed_count
