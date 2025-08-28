@@ -35,26 +35,98 @@ except Exception:  # pragma: no cover - soft dependency
     AIMessage = object  # type: ignore
 
 
+def _load_env_config():
+    """Load environment variables from .env file if available."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass  # dotenv not available, environment variables must be set manually
+
+
+def _get_env_value(key: str, default=None, value_type=str):
+    """Get environment variable with type conversion."""
+    value = os.getenv(key, default)
+    if value is None:
+        return None
+    
+    if value_type == bool:
+        return _parse_bool(str(value))
+    elif value_type == int:
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+    elif value_type == float:
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    else:
+        return value
+
+
 @dataclass
 class RetrieverConfig:
-    dsn: str
-    k: int = int(os.getenv("RAGDOC_RETRIEVAL_TOP_K", "8"))
-    alpha: float = float(os.getenv("RAGDOC_RETRIEVAL_ALPHA", "0.7"))  # weight for vector score vs lexical
-    embedding_model: str = os.getenv("RAGDOC_EMBEDDING_MODEL", "text-embedding-3-small")
-    use_fts: bool = _parse_bool(os.getenv("RAGDOC_RETRIEVAL_USE_FTS", "true"))  # Use PostgreSQL full-text search
-    fts_language: str = os.getenv("RAGDOC_RETRIEVAL_FTS_LANGUAGE", "english")  # Language for full-text search
-    title_boost: float = float(os.getenv("RAGDOC_RETRIEVAL_TITLE_BOOST", "1.5"))  # Boost factor for title matches
-    # BM25 parameters for sparse vector search
-    use_bm25: bool = _parse_bool(os.getenv("RAGDOC_RETRIEVAL_USE_BM25", "true"))  # Enable BM25 sparse vector search
-    bm25_k1: float = float(os.getenv("RAGDOC_RETRIEVAL_BM25_K1", "1.2"))  # Term frequency saturation parameter
-    bm25_b: float = float(os.getenv("RAGDOC_RETRIEVAL_BM25_B", "0.75"))  # Length normalization parameter
-    sparse_weight: float = float(os.getenv("RAGDOC_RETRIEVAL_SPARSE_WEIGHT", "0.3"))  # Weight for sparse vs dense search
+    dsn: str = None
+    k: int = None
+    alpha: float = None
+    embedding_model: str = None
+    use_fts: bool = None
+    fts_language: str = None
+    title_boost: float = None
+    use_bm25: bool = None
+    bm25_k1: float = None
+    bm25_b: float = None
+    sparse_weight: float = None
+    
+    def __post_init__(self):
+        """Load defaults from environment if not explicitly set."""
+        # Load .env configuration
+        _load_env_config()
+        
+        # Set defaults from environment for any None values
+        if self.dsn is None:
+            self.dsn = _get_env_value("DATABASE_URL", "")
+        if self.k is None:
+            self.k = _get_env_value("RAGDOC_RETRIEVAL_TOP_K", 8, int)
+        if self.alpha is None:
+            self.alpha = _get_env_value("RAGDOC_RETRIEVAL_ALPHA", 0.7, float)
+        if self.embedding_model is None:
+            self.embedding_model = _get_env_value("RAGDOC_EMBEDDING_MODEL", "text-embedding-3-small")
+        if self.use_fts is None:
+            self.use_fts = _get_env_value("RAGDOC_RETRIEVAL_USE_FTS", True, bool)
+        if self.fts_language is None:
+            self.fts_language = _get_env_value("RAGDOC_RETRIEVAL_FTS_LANGUAGE", "english")
+        if self.title_boost is None:
+            self.title_boost = _get_env_value("RAGDOC_RETRIEVAL_TITLE_BOOST", 1.5, float)
+        if self.use_bm25 is None:
+            self.use_bm25 = _get_env_value("RAGDOC_RETRIEVAL_USE_BM25", True, bool)
+        if self.bm25_k1 is None:
+            self.bm25_k1 = _get_env_value("RAGDOC_RETRIEVAL_BM25_K1", 1.2, float)
+        if self.bm25_b is None:
+            self.bm25_b = _get_env_value("RAGDOC_RETRIEVAL_BM25_B", 0.75, float)
+        if self.sparse_weight is None:
+            self.sparse_weight = _get_env_value("RAGDOC_RETRIEVAL_SPARSE_WEIGHT", 0.3, float)
 
 
 class Retriever:
     def __init__(self, cfg: RetrieverConfig) -> None:
         self.cfg = cfg
-        self.client = OpenAI()
+        
+        # Load environment variables from .env file if available
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass  # dotenv not available, environment variables must be set manually
+        
+        # Initialize OpenAI client with environment configuration
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is required but not set")
+            
+        self.client = OpenAI(api_key=openai_api_key)
 
     def _embed(self, text: str) -> list[float]:
         resp = self.client.embeddings.create(model=self.cfg.embedding_model, input=[text])

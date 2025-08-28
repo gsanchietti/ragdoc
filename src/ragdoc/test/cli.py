@@ -1,16 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
-import logging
-import os
-from dataclasses import dataclass
-from typing import Any
-
-from ragdoc.retrieval.retriever import Retriever, RetrieverConfig
-
-
-import argparse
 import logging
 import os
 import sys
@@ -19,47 +9,99 @@ from typing import Optional
 from ragdoc.retrieval.retriever import Retriever, RetrieverConfig
 
 
+def load_env_config():
+    """Load configuration from .env file if available."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass  # dotenv not available, environment variables must be set manually
+
+
+def get_config_value(key: str, default=None, value_type=str):
+    """Get configuration value from environment with type conversion."""
+    value = os.getenv(key, default)
+    if value is None:
+        return None
+    
+    if value_type == bool:
+        return value.lower() in ('true', '1', 'yes', 'on')
+    elif value_type == int:
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+    elif value_type == float:
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    else:
+        return value
+
+
 def handle_query(args) -> int:
+    # Load environment configuration
+    load_env_config()
+    
     # Set up debug logging for retrieval operations
+    log_level = get_config_value("RAGDOC_LOG_LEVEL", "INFO").upper()
+    if args.debug or log_level == "DEBUG":
+        level = logging.DEBUG
+    else:
+        level = getattr(logging, log_level, logging.INFO)
+        
     logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s"
     )
     
-    dsn = args.database_url or os.getenv("DATABASE_URL", "")
+    # Get database URL from args or environment
+    dsn = args.database_url or get_config_value("DATABASE_URL", "")
     if not dsn:
-        print("DATABASE_URL not provided.")
+        print("❌ DATABASE_URL not provided in arguments or .env file.")
         return 2
+        
     text = args.text.strip()
     if not text:
-        print("Empty query text.")
+        print("❌ Empty query text.")
         return 2
 
-    # Create retriever config that ensures hybrid search is always executed
-    # Handle BM25 enable/disable flags
-    use_bm25 = args.use_bm25 and not args.no_bm25
+    # Get configuration values from .env with command line overrides
+    k = args.k if hasattr(args, 'k') and args.k != 5 else get_config_value("RAGDOC_RETRIEVAL_TOP_K", 5, int)
+    alpha = args.alpha if hasattr(args, 'alpha') and args.alpha != 0.7 else get_config_value("RAGDOC_RETRIEVAL_ALPHA", 0.7, float)
+    title_boost = args.title_boost if hasattr(args, 'title_boost') and args.title_boost != 1.5 else get_config_value("RAGDOC_RETRIEVAL_TITLE_BOOST", 1.5, float)
+    use_fts = get_config_value("RAGDOC_RETRIEVAL_USE_FTS", True, bool)
     
+    # Handle BM25 configuration
+    use_bm25_env = get_config_value("RAGDOC_RETRIEVAL_USE_BM25", True, bool)
+    use_bm25 = args.use_bm25 and not args.no_bm25 if hasattr(args, 'use_bm25') else use_bm25_env
+    bm25_k1 = args.bm25_k1 if hasattr(args, 'bm25_k1') and args.bm25_k1 != 1.2 else get_config_value("RAGDOC_RETRIEVAL_BM25_K1", 1.2, float)
+    bm25_b = args.bm25_b if hasattr(args, 'bm25_b') and args.bm25_b != 0.75 else get_config_value("RAGDOC_RETRIEVAL_BM25_B", 0.75, float)
+    sparse_weight = args.sparse_weight if hasattr(args, 'sparse_weight') and args.sparse_weight != 0.3 else get_config_value("RAGDOC_RETRIEVAL_SPARSE_WEIGHT", 0.3, float)
+    
+    # Create retriever config with .env defaults and CLI overrides
     config = RetrieverConfig(
         dsn=dsn, 
-        k=args.k,
-        alpha=args.alpha,  # Allow configuring the hybrid balance
-        use_fts=True,      # Always enable full-text search
-        title_boost=args.title_boost,  # Allow configuring title boost
-        use_bm25=use_bm25,  # Allow enabling/disabling BM25
-        bm25_k1=args.bm25_k1,  # BM25 term frequency saturation
-        bm25_b=args.bm25_b,    # BM25 length normalization
-        sparse_weight=args.sparse_weight  # Weight for sparse vector component
+        k=k,
+        alpha=alpha,
+        use_fts=use_fts,
+        title_boost=title_boost,
+        use_bm25=use_bm25,
+        bm25_k1=bm25_k1,
+        bm25_b=bm25_b,
+        sparse_weight=sparse_weight
     )
     
     retriever = Retriever(config)
     
-    print(f"Executing hybrid search with query: {text!r}")
-    print(f"Configuration: alpha={config.alpha:.2f}, use_fts={config.use_fts}, title_boost={config.title_boost:.1f}")
-    print(f"BM25 Configuration: use_bm25={config.use_bm25}, k1={config.bm25_k1:.1f}, b={config.bm25_b:.2f}, sparse_weight={config.sparse_weight:.2f}")
+    print(f"🔍 Executing hybrid search with query: {text!r}")
+    print(f"📊 Configuration: alpha={config.alpha:.2f}, use_fts={config.use_fts}, title_boost={config.title_boost:.1f}")
+    print(f"🎯 BM25 Configuration: use_bm25={config.use_bm25}, k1={config.bm25_k1:.1f}, b={config.bm25_b:.2f}, sparse_weight={config.sparse_weight:.2f}")
     
-    results = retriever.search(text, k=args.k)
+    results = retriever.search(text, k=k)
 
-    print(f"\nHybrid search results ({len(results)} found):")
+    print(f"\n📋 Hybrid search results ({len(results)} found):")
     print("=" * 80)
     
     for i, r in enumerate(results, start=1):
@@ -85,23 +127,29 @@ def handle_query(args) -> int:
 
 def handle_chat(args) -> int:
     """Handle the chat subcommand."""
-    # Load environment variables from .env file if available
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass  # dotenv not available, environment variables must be set manually
+    # Load environment configuration first
+    load_env_config()
     
-    # Check environment
-    if not os.getenv("OPENAI_API_KEY"):
+    # Check required environment variables
+    openai_key = get_config_value("OPENAI_API_KEY")
+    if not openai_key:
         print("❌ Error: OPENAI_API_KEY not found in environment")
-        print("Make sure you have a .env file with your OpenAI API key or set the environment variable")
+        print("💡 Make sure you have a .env file with your OpenAI API key or set the environment variable")
         return 1
         
-    if not os.getenv("DATABASE_URL"):
+    database_url = get_config_value("DATABASE_URL")
+    if not database_url:
         print("❌ Error: DATABASE_URL not found in environment")
-        print("Make sure you have a database configured")
+        print("💡 Make sure you have a database configured in your .env file")
         return 1
+    
+    # Set up logging from .env configuration
+    log_level = get_config_value("RAGDOC_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, log_level, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s"
+    )
     
     # Import chat functionality
     try:
@@ -109,7 +157,7 @@ def handle_chat(args) -> int:
         from langchain_core.messages import HumanMessage, AIMessage
     except ImportError as e:
         print(f"❌ Error importing required modules for chat: {e}")
-        print("Make sure all dependencies are installed")
+        print("💡 Make sure all dependencies are installed")
         return 1
     
     if args.test:
@@ -125,10 +173,17 @@ def run_interactive_chat(language: str = "it") -> int:
     
     print("🤖 RAGDoc Chat Interface")
     print("=" * 50)
-    print(f"Language: {language}")
-    print("Type 'quit', 'exit', or press Ctrl+C to stop")
-    print("Type 'debug' to see current conversation state")
-    print("Type 'clear' to clear conversation history")
+    print(f"🌐 Language: {language}")
+    print(f"🗄️  Database: {get_config_value('DATABASE_URL', 'Not configured')[:50]}...")
+    print(f"🧠 Answer Model: {get_config_value('RAGDOC_ANSWER_MODEL', 'gpt-4o-mini')}")
+    print(f"🎯 Confidence Threshold: {get_config_value('RAGDOC_CONFIDENCE_THRESHOLD', 0.65, float)}")
+    print(f"📊 Retrieval Top-K: {get_config_value('RAGDOC_RETRIEVAL_TOP_K', 8, int)}")
+    print(f"🔍 BM25 Enabled: {get_config_value('RAGDOC_RETRIEVAL_USE_BM25', True, bool)}")
+    print("=" * 50)
+    print("💬 Type 'quit', 'exit', or press Ctrl+C to stop")
+    print("🐛 Type 'debug' to see current conversation state")
+    print("🧹 Type 'clear' to clear conversation history")
+    print("⚙️  Type 'config' to show current configuration")
     print("=" * 50)
     
     # Initialize graph and conversation state
@@ -162,6 +217,10 @@ def run_interactive_chat(language: str = "it") -> int:
                 
             if user_input.lower() == 'debug':
                 show_debug_info(conversation_state)
+                continue
+                
+            if user_input.lower() == 'config':
+                show_config_info()
                 continue
                 
             if user_input.lower() == 'clear':
@@ -340,6 +399,40 @@ def process_message(graph, conversation_state, user_input: str, language: str):
     )
 
 
+def show_config_info():
+    """Show current configuration from .env file."""
+    print("\n" + "=" * 30 + " CONFIGURATION " + "=" * 30)
+    
+    # Core settings
+    print("🔧 Core Settings:")
+    print(f"   Database URL: {get_config_value('DATABASE_URL', 'Not set')[:50]}...")
+    print(f"   OpenAI API Key: {'✅ Set' if get_config_value('OPENAI_API_KEY') else '❌ Not set'}")
+    print(f"   Log Level: {get_config_value('RAGDOC_LOG_LEVEL', 'INFO')}")
+    
+    # Model configuration
+    print("\n🧠 Model Configuration:")
+    print(f"   Answer Model: {get_config_value('RAGDOC_ANSWER_MODEL', 'gpt-4o-mini')}")
+    print(f"   Summarization Model: {get_config_value('RAGDOC_SUMMARIZATION_MODEL', 'gpt-4o-mini')}")
+    print(f"   Translation Model: {get_config_value('RAGDOC_TRANSLATION_MODEL', 'gpt-4o-mini')}")
+    
+    # Retrieval settings
+    print("\n🔍 Retrieval Configuration:")
+    print(f"   Top-K Results: {get_config_value('RAGDOC_RETRIEVAL_TOP_K', 8, int)}")
+    print(f"   Confidence Threshold: {get_config_value('RAGDOC_CONFIDENCE_THRESHOLD', 0.65, float)}")
+    print(f"   Alpha (Vector Weight): {get_config_value('RAGDOC_RETRIEVAL_ALPHA', 0.7, float)}")
+    print(f"   Title Boost: {get_config_value('RAGDOC_RETRIEVAL_TITLE_BOOST', 1.5, float)}")
+    print(f"   Use FTS: {get_config_value('RAGDOC_RETRIEVAL_USE_FTS', True, bool)}")
+    
+    # BM25 settings
+    print("\n🎯 BM25 Configuration:")
+    print(f"   Use BM25: {get_config_value('RAGDOC_RETRIEVAL_USE_BM25', True, bool)}")
+    print(f"   BM25 K1: {get_config_value('RAGDOC_RETRIEVAL_BM25_K1', 1.2, float)}")
+    print(f"   BM25 B: {get_config_value('RAGDOC_RETRIEVAL_BM25_B', 0.75, float)}")
+    print(f"   Sparse Weight: {get_config_value('RAGDOC_RETRIEVAL_SPARSE_WEIGHT', 0.3, float)}")
+    
+    print("=" * 76)
+
+
 def show_debug_info(conversation_state):
     """Show debug information about current conversation state."""
     print("\n" + "=" * 30 + " DEBUG INFO " + "=" * 30)
@@ -362,25 +455,51 @@ def show_debug_info(conversation_state):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ragdoc-test", description="Test utilities for ragdoc")
+    # Load .env configuration first to get defaults
+    load_env_config()
+    
+    # Get default values from .env
+    default_k = get_config_value("RAGDOC_RETRIEVAL_TOP_K", 5, int)
+    default_database_url = get_config_value("DATABASE_URL", "")
+    default_alpha = get_config_value("RAGDOC_RETRIEVAL_ALPHA", 0.7, float)
+    default_title_boost = get_config_value("RAGDOC_RETRIEVAL_TITLE_BOOST", 1.5, float)
+    default_use_bm25 = get_config_value("RAGDOC_RETRIEVAL_USE_BM25", True, bool)
+    default_bm25_k1 = get_config_value("RAGDOC_RETRIEVAL_BM25_K1", 1.2, float)
+    default_bm25_b = get_config_value("RAGDOC_RETRIEVAL_BM25_B", 0.75, float)
+    default_sparse_weight = get_config_value("RAGDOC_RETRIEVAL_SPARSE_WEIGHT", 0.3, float)
+    
+    parser = argparse.ArgumentParser(
+        prog="ragdoc-test", 
+        description="Test utilities for ragdoc - loads configuration from .env file"
+    )
     sub = parser.add_subparsers(dest="action", required=True)
 
-    # Query subcommand (existing)
+    # Query subcommand with .env defaults
     q = sub.add_parser("query", help="Query the vector DB with a text prompt using hybrid search")
     q.add_argument("text", help="Query text")
-    q.add_argument("--k", type=int, default=5, help="Top K results (default: 5)")
-    q.add_argument("--database-url", default=os.getenv("DATABASE_URL", ""), help="Postgres DSN")
-    q.add_argument("--alpha", type=float, default=0.7, help="Hybrid search balance: vector weight (default: 0.7)")
-    q.add_argument("--title-boost", type=float, default=1.5, help="Title match boost factor (default: 1.5)")
-    q.add_argument("--use-bm25", action="store_true", default=True, help="Enable BM25 sparse vector search (default: True)")
-    q.add_argument("--no-bm25", action="store_true", help="Disable BM25 sparse vector search")
-    q.add_argument("--bm25-k1", type=float, default=1.2, help="BM25 term frequency saturation parameter (default: 1.2)")
-    q.add_argument("--bm25-b", type=float, default=0.75, help="BM25 length normalization parameter (default: 0.75)")
-    q.add_argument("--sparse-weight", type=float, default=0.3, help="Weight for sparse vector component (default: 0.3)")
-    q.add_argument("--debug", action="store_true", help="Enable debug logging to see executed queries")
+    q.add_argument("--k", type=int, default=default_k, 
+                   help=f"Top K results (default: {default_k} from .env or fallback)")
+    q.add_argument("--database-url", default=default_database_url, 
+                   help=f"Postgres DSN (default: from .env DATABASE_URL)")
+    q.add_argument("--alpha", type=float, default=default_alpha, 
+                   help=f"Hybrid search balance: vector weight (default: {default_alpha} from .env)")
+    q.add_argument("--title-boost", type=float, default=default_title_boost, 
+                   help=f"Title match boost factor (default: {default_title_boost} from .env)")
+    q.add_argument("--use-bm25", action="store_true", default=default_use_bm25, 
+                   help=f"Enable BM25 sparse vector search (default: {default_use_bm25} from .env)")
+    q.add_argument("--no-bm25", action="store_true", 
+                   help="Disable BM25 sparse vector search")
+    q.add_argument("--bm25-k1", type=float, default=default_bm25_k1, 
+                   help=f"BM25 term frequency saturation parameter (default: {default_bm25_k1} from .env)")
+    q.add_argument("--bm25-b", type=float, default=default_bm25_b, 
+                   help=f"BM25 length normalization parameter (default: {default_bm25_b} from .env)")
+    q.add_argument("--sparse-weight", type=float, default=default_sparse_weight, 
+                   help=f"Weight for sparse vector component (default: {default_sparse_weight} from .env)")
+    q.add_argument("--debug", action="store_true", 
+                   help="Enable debug logging (overrides RAGDOC_LOG_LEVEL in .env)")
     q.set_defaults(func=handle_query)
 
-    # Chat subcommand (new)
+    # Chat subcommand
     c = sub.add_parser("chat", help="Interactive chat interface with the RAGDoc agent")
     c.add_argument(
         "--language", "-l", 

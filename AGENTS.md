@@ -111,6 +111,9 @@ Example action schema (JSON):
 }
 ```
 
+Tests:
+- When creating tests, put them inside the test directory
+
 ## 8) Prompts
 System prompt (shared policy; language-conditioned):
 - You are ragdoc, a support assistant.

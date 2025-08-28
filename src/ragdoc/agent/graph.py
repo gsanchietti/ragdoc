@@ -11,6 +11,20 @@ from langgraph.graph import END, START, StateGraph
 
 from ragdoc.retrieval.retriever import Retriever, RetrieverConfig
 from .prompts import get_agent_prompts
+
+
+def _load_env_config():
+    """Load environment variables from .env file if available."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass  # dotenv not available, environment variables must be set manually
+
+
+# Load .env configuration at module import
+_load_env_config()
+
 # Logger setup
 logger = logging.getLogger("ragdoc.agent")
 if not logger.handlers:
